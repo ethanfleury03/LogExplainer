@@ -35,6 +35,16 @@ Or use the convenience script:
 
 - `./run_py2.sh --help`
 
+## Run GUI (Arrow Log Helper V1 UI, stubbed)
+
+From the `LogExplainer/` directory:
+
+- `PYTHONPATH=src python -m arrow_log_helper.gui`
+
+Or via the optional CLI flag:
+
+- `PYTHONPATH=src python -m arrow_log_helper.cli --gui`
+
 ## Repo name vs Python package name (expected)
 
 - Repo folder: `LogExplainer/`
