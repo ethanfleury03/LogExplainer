@@ -65,9 +65,10 @@ def main(argv=None):
         sys.stdout.write("NO_GUI mode\n")
         return 0
 
-    from arrow_log_helper import gui
+    # Launch via the package entrypoint so safety bootstrap + write firewall is installed.
+    from arrow_log_helper import __main__ as alh_main
 
-    return int(gui.main([]) or 0)
+    return int(alh_main.main([]) or 0)
 
 
 if __name__ == "__main__":

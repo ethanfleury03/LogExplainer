@@ -34,50 +34,43 @@ class SearchCodeTest(unittest.TestCase):
     def test_exact_match_found(self):
         parsed = parse_log.analyze_pasted_text(SAMPLE_BLOCK)
         roots = [self._fixture_root()]
-        res = search_code.search_in_roots(
+        msg = parsed.get("search_message")
+        res, stats = search_code.search_message_exact_in_roots(
             roots=roots,
-            key_exact=parsed.get("key_exact"),
-            key_normalized=parsed.get("key_normalized"),
-            tokens=parsed.get("tokens") or [],
-            component=parsed.get("component"),
+            message=msg,
             include_exts=[".py"],
             exclude_dir_names=["__pycache__"],
             case_insensitive=False,
             max_results=10,
+            component=parsed.get("component"),
         )
         self.assertTrue(res, msg="Expected at least 1 match")
         top = res[0]
-        self.assertEqual(top.get("match_type"), "exact")
+        self.assertEqual(top.get("match_type"), "exact_message")
         self.assertGreaterEqual(float(top.get("score", 0.0)), 0.9)
 
     def test_normalized_fallback(self):
-        # key_exact (with CamelCase + component) is not present, but normalized version is.
-        log = "2025-12-19T05:22:06.895453+11:00 RS20300529 Kareela0: <E> [#4] PeriodicIdle: WaitComplete FOR localhost:9210:Dyn-ultron:VALVE"
+        # Message-only exact search: casing differences require case_insensitive=True.
+        log = "2025-12-19T05:22:06.895453+11:00 RS20300529 Kareela0: <E> [#4] PeriodicIdle: WAITCOMPLETE for localhost:9210:Dyn-ultron:VALVE"
         parsed = parse_log.analyze_pasted_text(log)
         roots = [self._fixture_root()]
-        res = search_code.search_in_roots(
+        res, stats = search_code.search_message_exact_in_roots(
             roots=roots,
-            key_exact=parsed.get("key_exact"),
-            key_normalized=parsed.get("key_normalized"),
-            tokens=parsed.get("tokens") or [],
-            component=parsed.get("component"),
+            message=parsed.get("search_message"),
             include_exts=[".py"],
             exclude_dir_names=["__pycache__"],
-            case_insensitive=False,
+            case_insensitive=True,
             max_results=10,
         )
         self.assertTrue(res, msg="Expected fallback matches")
-        self.assertIn(res[0].get("match_type"), ("normalized", "tokens"))
+        self.assertEqual(res[0].get("match_type"), "exact_message")
 
     def test_exclude_dirs(self):
         parsed = parse_log.analyze_pasted_text(SAMPLE_BLOCK)
         roots = [self._fixture_root()]
-        res = search_code.search_in_roots(
+        res, stats = search_code.search_message_exact_in_roots(
             roots=roots,
-            key_exact=parsed.get("key_exact"),
-            key_normalized=parsed.get("key_normalized"),
-            tokens=parsed.get("tokens") or [],
-            component=parsed.get("component"),
+            message=parsed.get("search_message"),
             include_exts=[".py"],
             exclude_dir_names=["__pycache__"],
             case_insensitive=False,
@@ -113,12 +106,9 @@ class SearchCodeTest(unittest.TestCase):
             # Search for the symlink-only string within temp_root. Should find nothing by default.
             log = "SymlinkOnly: very_unique_marker_123456"
             parsed = parse_log.analyze_pasted_text(log)
-            res = search_code.search_in_roots(
+            res, stats = search_code.search_message_exact_in_roots(
                 roots=[temp_root],
-                key_exact=parsed.get("key_exact"),
-                key_normalized=parsed.get("key_normalized"),
-                tokens=parsed.get("tokens") or [],
-                component=parsed.get("component"),
+                message=parsed.get("search_message") or parsed.get("message") or "SymlinkOnly: very_unique_marker_123456",
                 include_exts=[".py"],
                 exclude_dir_names=[],
                 case_insensitive=False,
@@ -145,6 +135,33 @@ class SearchCodeTest(unittest.TestCase):
                 shutil.rmtree(outside)
             except Exception:
                 pass
+
+    def test_max_files_scanned(self):
+        parsed = parse_log.analyze_pasted_text(SAMPLE_BLOCK)
+        res, stats = search_code.search_message_exact_in_roots(
+            roots=[self._fixture_root()],
+            message=parsed.get("search_message"),
+            include_exts=[".py"],
+            exclude_dir_names=["__pycache__"],
+            case_insensitive=False,
+            max_results=10,
+            max_files_scanned=1,
+        )
+        self.assertIn(stats.get("stopped_reason"), ("max_files", "max_results", None))
+
+    def test_max_seconds(self):
+        parsed = parse_log.analyze_pasted_text(SAMPLE_BLOCK)
+        res, stats = search_code.search_message_exact_in_roots(
+            roots=[self._fixture_root()],
+            message=parsed.get("search_message"),
+            include_exts=[".py"],
+            exclude_dir_names=["__pycache__"],
+            case_insensitive=False,
+            max_results=10,
+            max_seconds=0.0,
+        )
+        self.assertIn(stats.get("stopped_reason"), ("max_seconds", "max_results", None))
+        self.assertGreaterEqual(float(stats.get("elapsed_seconds", 0.0)), 0.0)
 
 
 if __name__ == "__main__":

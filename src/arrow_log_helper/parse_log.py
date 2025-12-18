@@ -170,6 +170,24 @@ def build_keys(parsed, normalize_numbers=False):
     }
 
 
+def get_search_message(parsed):
+    """
+    For real-machine mode we search by the message text only.
+    Prefer parsed["message"] if present; otherwise fall back to key_exact.
+    """
+    parsed = parsed or {}
+    msg = parsed.get("message") or ""
+    msg = _to_text(msg).strip()
+    if msg:
+        return msg
+    # Fallback (best-effort) if message is missing.
+    try:
+        keys = build_keys(parsed, normalize_numbers=False)
+        return _to_text(keys.get("key_exact", "")).strip()
+    except Exception:
+        return ""
+
+
 def analyze_pasted_text(text, normalize_numbers=False):
     """
     End-to-end helper for UI/backends.
@@ -178,10 +196,12 @@ def analyze_pasted_text(text, normalize_numbers=False):
     selected_line = select_relevant_line(text)
     parsed = parse_line(selected_line)
     keys = build_keys(parsed, normalize_numbers=normalize_numbers)
+    search_message = get_search_message(parsed)
 
     out = {"selected_line": selected_line}
     out.update(parsed)
     out.update(keys)
+    out["search_message"] = search_message
     return out
 
 

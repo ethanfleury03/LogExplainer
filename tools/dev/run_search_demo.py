@@ -33,14 +33,20 @@ def build_parser(default_root):
     p.add_argument(
         "--max-results",
         type=int,
-        default=10,
-        help="Maximum results to return.",
+        default=None,
+        help="Maximum results to return (omit for unlimited).",
     )
     p.add_argument(
         "--case-insensitive",
         action="store_true",
         default=False,
         help="Case-insensitive matching.",
+    )
+    p.add_argument(
+        "--with-extract",
+        action="store_true",
+        default=False,
+        help="Also extract enclosing def/class for the top match and print the block.",
     )
     return p
 
@@ -51,8 +57,7 @@ def main(argv=None):
     default_root = os.path.join(repo_root, "tests", "fixtures", "sample_repo")
     args = build_parser(default_root).parse_args(argv)
 
-    from arrow_log_helper import parse_log
-    from arrow_log_helper import search_code
+    from arrow_log_helper import analyzer
     from arrow_log_helper import config_defaults
 
     sample_block = "\n".join(
@@ -64,45 +69,59 @@ def main(argv=None):
         ]
     )
 
-    log_text = args.log if args.log is not None else sample_block
-    parsed = parse_log.analyze_pasted_text(log_text, normalize_numbers=False)
-
     roots = args.roots or [default_root]
-    include_exts = list(getattr(config_defaults, "DEFAULT_INCLUDE_EXT", [".py"]))
     exclude_dirs = list(getattr(config_defaults, "DEFAULT_EXCLUDE_DIRS", []))
 
-    matches = search_code.search_in_roots(
-        roots=roots,
-        key_exact=parsed.get("key_exact"),
-        key_normalized=parsed.get("key_normalized"),
-        tokens=parsed.get("tokens") or [],
-        component=parsed.get("component"),
-        include_exts=include_exts,
-        exclude_dir_names=exclude_dirs,
-        case_insensitive=bool(args.case_insensitive),
-        max_results=int(args.max_results),
-        follow_symlinks=False,
-        max_file_bytes=getattr(config_defaults, "DEFAULT_MAX_FILE_BYTES", search_code.DEFAULT_MAX_FILE_BYTES),
+    log_text = args.log if args.log is not None else sample_block
+    result = analyzer.analyze(
+        log_text,
+        settings={
+            "roots": roots,
+            "exclude_dirs": exclude_dirs,
+            "case_insensitive": bool(args.case_insensitive),
+            "max_results": args.max_results,
+            "max_file_bytes": getattr(config_defaults, "DEFAULT_MAX_FILE_BYTES", 10 * 1024 * 1024),
+            "max_seconds": None,
+            "max_files_scanned": None,
+            "context_fallback": 50,
+        },
     )
+    matches = result.get("matches") or []
+    stats = result.get("scan_stats") or {}
 
     print("Selected line:")
-    print(parsed.get("selected_line", ""))
+    print(result.get("selected_line", ""))
     print("")
-    print("key_exact: %s" % (parsed.get("key_exact", ""),))
-    print("key_normalized: %s" % (parsed.get("key_normalized", ""),))
+    print("search_message: %s" % (result.get("search_message", ""),))
     print("")
     print("Matches:")
+    shown = 0
     for m in matches:
+        shown += 1
+        if shown > 25:
+            break
         print(
-            "  %.2f %-10s %s:%s  %s"
+            "  %s:%s  |  %s"
             % (
-                float(m.get("score", 0.0)),
-                m.get("match_type", "?"),
                 m.get("path", "?"),
                 m.get("line_no", "?"),
-                m.get("line_text", ""),
+                m.get("signature") or "<no def> (context)",
             )
         )
+
+    if args.with_extract and matches:
+        top = matches[0]
+        print("")
+        print("Top detail:")
+        print("  match_type: %s" % (top.get("match_type"),))
+        print("  signature: %s" % (top.get("signature"),))
+        if not top.get("signature"):
+            print("")
+            print(top.get("context_preview") or "")
+    print("")
+    print("Scan stats:")
+    for k in sorted(stats.keys()):
+        print("  %s: %s" % (k, stats.get(k)))
 
     return 0
 
