@@ -45,6 +45,23 @@ Or via the optional CLI flag:
 
 - `PYTHONPATH=src python -m arrow_log_helper.cli --gui`
 
+## How to run (printer machine)
+
+On the printer machine (or any locked-down host), the primary entrypoint is the single file `RUN_ME.py`.
+
+- **Copy the repo folder** (this project is **stdlib-only**; no installs required)
+- **Run**:
+  - `python RUN_ME.py`
+
+Safety notes:
+
+- **Read-only**: current scaffold does not scan the filesystem or modify any external paths.
+- **Stdlib-only**: no third-party dependencies.
+
+Notes for maintainers:
+
+- `run_py2.sh` is kept for developer convenience; **`RUN_ME.py` is the primary entrypoint** for technicians.
+
 ## Repo name vs Python package name (expected)
 
 - Repo folder: `LogExplainer/`
