@@ -112,7 +112,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
         self.bare_except_blocks = []  # List of (line_no, file_context)
         
         # Error template tracking
-        self.error_templates = []  # List of (template, level, line_no) for error/exception/critical calls
+        self.error_templates = []  # List of (template, kind, level, line_no) for error/exception/critical calls
         
         # Config detection with context
         self.config_calls = []  # List of (line_no, config_type, is_guarded)
@@ -667,7 +667,7 @@ class RepoScanner:
         self.unknown_logger_var_files = defaultdict(set)  # var_name -> set of files
         
         # Error template tracking (production only)
-        self.error_templates = []  # List of (template, level, file, line_no)
+        self.error_templates = []  # List of (template, kind, level, file_path, line_no)
         self.error_template_counts = Counter()  # template -> count
         self.error_template_files = defaultdict(set)  # template -> set of files
         
@@ -1078,6 +1078,22 @@ class RepoScanner:
                             "print_calls": result["print_calls"],
                             "logging_calls": result["logging_calls"]
                         })
+    
+    def _build_unknown_logger_vars_data(self):
+        """Build unknown logger vars data with correct example files mapping."""
+        # Get top vars by call count
+        top_vars = sorted(self.unknown_logger_vars.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        # Build var_files mapping for top vars only
+        var_files = {}
+        for var_name, _ in top_vars:
+            files = sorted(list(self.unknown_logger_var_files.get(var_name, set())))
+            var_files[var_name] = files[:5]
+        
+        return {
+            "top_vars": top_vars,
+            "var_files": var_files
+        }
     
     def get_report_data(self):
         """Get structured report data."""
@@ -1815,30 +1831,43 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
     # Python 2.7: handle unicode output properly
     # Note: unicode is a built-in type in Python 2.7, not available in Python 3
     try:
-        # Python 2.7: encode unicode to bytes for stdout
-        # Check for unicode type (Python 2.7 only)
+        # Check Python version for proper handling
         try:
             unicode_type = unicode  # Python 2.7
+            is_python2 = True
         except NameError:
-            unicode_type = str  # Python 3 (shouldn't happen, but safe)
+            unicode_type = str  # Python 3
+            is_python2 = False
         
-        if isinstance(output, unicode_type):
-            sys.stdout.write(output.encode("utf-8", errors="replace"))
+        if is_python2:
+            # Python 2.7: encode unicode to bytes for stdout
+            if isinstance(output, unicode_type):
+                sys.stdout.write(output.encode("utf-8", errors="replace"))
+            else:
+                sys.stdout.write(output)
         else:
-            sys.stdout.write(output)
+            # Python 3: stdout expects str, not bytes
+            if isinstance(output, bytes):
+                sys.stdout.write(output.decode("utf-8", errors="replace"))
+            else:
+                sys.stdout.write(output)
         sys.stdout.flush()
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        # Fallback: try to print directly (Python 2.7 will handle unicode if terminal supports it)
+    except (UnicodeEncodeError, UnicodeDecodeError, TypeError):
+        # Fallback: try to print directly
         try:
             print(output)
-        except UnicodeEncodeError:
+        except (UnicodeEncodeError, TypeError):
             # Last resort: encode to ASCII with replacement
             try:
                 unicode_type = unicode  # Python 2.7
             except NameError:
                 unicode_type = str  # Python 3
             if isinstance(output, unicode_type):
-                print(output.encode("ascii", errors="replace"))
+                try:
+                    print(output.encode("ascii", errors="replace"))
+                except:
+                    # Final fallback: just print as-is
+                    print(str(output))
             else:
                 print(output)
     
