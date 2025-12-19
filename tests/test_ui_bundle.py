@@ -148,10 +148,11 @@ class UIBundleTest(unittest.TestCase):
         
         bundle = ui_bundle.build_ui_bundle(analysis_result, None)
         matches = bundle["matches"]
-        self.assertEqual(matches[0]["confidence_percent"], 0)  # 0.0 -> 0
-        self.assertEqual(matches[1]["confidence_percent"], 50)  # 0.5 -> 50
-        self.assertEqual(matches[2]["confidence_percent"], 100)  # 1.0 -> 100
-        self.assertEqual(matches[3]["confidence_percent"], 88)  # 0.876 -> 88 (rounded)
+        # Matches are sorted by score descending: [1.0, 0.876, 0.5, 0.0]
+        self.assertEqual(matches[0]["confidence_percent"], 100)  # 1.0 -> 100
+        self.assertEqual(matches[1]["confidence_percent"], 88)  # 0.876 -> 88 (rounded)
+        self.assertEqual(matches[2]["confidence_percent"], 50)  # 0.5 -> 50
+        self.assertEqual(matches[3]["confidence_percent"], 0)  # 0.0 -> 0
 
     def test_location_short_formatting(self):
         """Test location_short is formatted correctly."""

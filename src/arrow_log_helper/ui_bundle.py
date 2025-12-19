@@ -44,15 +44,29 @@ def _make_json_serializable(obj):
 
 
 def _compute_confidence_percent(score):
-    """Convert score (0.0-1.0) to integer percent (0-100)."""
+    """Convert score (0.0-1.0) to integer percent (0-100).
+    
+    Args:
+        score: float, int, None, or other numeric type. If None or not convertible,
+               treated as 0.0.
+    
+    Returns:
+        int: confidence percent (0-100)
+    """
+    # Handle None or missing score explicitly (preserve 0.0, don't treat as falsy)
+    if score is None:
+        return 0
+    
     try:
         score = float(score)
+        # Clamp to [0.0, 1.0]
         if score < 0.0:
             score = 0.0
         if score > 1.0:
             score = 1.0
         return int(round(score * 100))
-    except Exception:
+    except (TypeError, ValueError):
+        # If conversion fails, treat as 0.0
         return 0
 
 
@@ -102,7 +116,10 @@ def _generate_summary_text(match, parsed, search_message):
     
     # Match info
     match_type = match.get("match_type") or "unknown"
-    score = match.get("score", 0.0)
+    # Explicitly check for None to preserve 0.0 (don't use 'or' which treats 0.0 as falsy)
+    score = match.get("score")
+    if score is None:
+        score = 0.0
     confidence = _compute_confidence_percent(score)
     path = match.get("path", "?")
     line_no = match.get("line_no", "?")
@@ -151,7 +168,10 @@ def build_ui_bundle(analysis_result, selected_match_index):
         match_dict = dict(m)
         
         # Compute additional fields
-        score = match_dict.get("score", 0.0)
+        # Explicitly check for None to preserve 0.0 (don't use 'or' which treats 0.0 as falsy)
+        score = match_dict.get("score")
+        if score is None:
+            score = 0.0
         match_dict["confidence_percent"] = _compute_confidence_percent(score)
         
         path = match_dict.get("path", "")
