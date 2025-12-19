@@ -52,6 +52,9 @@ DEFAULT_IGNORE_DIRS = {
     ".cache", "models", "latest_model", "storage", "logs"
 }
 
+# Script-like directory markers (for print classification)
+SCRIPT_PATH_MARKERS = ("/scripts/", "\\scripts\\", "/bin/", "\\bin\\")
+
 
 class LoggingASTVisitor(ast.NodeVisitor):
     """AST visitor to extract logging patterns from Python code."""
@@ -241,14 +244,35 @@ class LoggingASTVisitor(ast.NodeVisitor):
         
         self.generic_visit(node)
     
+    def visit_Print(self, node):
+        """Track Python 2 print statements (print "x" syntax)."""
+        # Python 2 print statement: print "x" or print >>sys.stderr, "x"
+        self.print_calls += 1
+        # Check if file path contains script-like markers
+        if self.file_path:
+            file_path_lower = self.file_path.lower()
+            is_script = any(marker in file_path_lower for marker in SCRIPT_PATH_MARKERS)
+            if is_script:
+                self.print_calls_in_scripts += 1
+            else:
+                self.print_calls_outside_scripts += 1
+        else:
+            self.print_calls_outside_scripts += 1
+        self.generic_visit(node)
+    
     def visit_Call(self, node):
         """Track function calls (logging, print, config, exceptions)."""
-        # Print calls - split by scripts/ path
+        # Print calls - split by script-like paths
         if isinstance(node.func, ast.Name) and node.func.id == "print":
             self.print_calls += 1
-            # Check if file path contains scripts/ (case-insensitive)
-            if self.file_path and ("\\scripts\\" in self.file_path.lower() or "/scripts/" in self.file_path.lower()):
-                self.print_calls_in_scripts += 1
+            # Check if file path contains script-like markers
+            if self.file_path:
+                file_path_lower = self.file_path.lower()
+                is_script = any(marker in file_path_lower for marker in SCRIPT_PATH_MARKERS)
+                if is_script:
+                    self.print_calls_in_scripts += 1
+                else:
+                    self.print_calls_outside_scripts += 1
             else:
                 self.print_calls_outside_scripts += 1
             return
@@ -262,8 +286,15 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 return
         
         # Logging method calls (logger.info, logging.info, etc.)
+        # Support aliases: warn -> warning, fatal -> critical
         if isinstance(node.func, ast.Attribute):
             attr_name = node.func.attr
+            # Normalize aliases
+            if attr_name == "warn":
+                attr_name = "warning"
+            elif attr_name == "fatal":
+                attr_name = "critical"
+            
             if attr_name in ("debug", "info", "warning", "error", "critical", "exception"):
                 line_no = node.lineno
                 
@@ -277,8 +308,8 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 
                 # Extract error template for error/exception/critical calls
                 if level_to_count in ("error", "exception", "critical"):
-                    template = self._extract_error_template(node)
-                    self.error_templates.append((template, level_to_count, line_no))
+                    template, kind = self._extract_error_template(node)
+                    self.error_templates.append((template, kind, level_to_count, line_no))
                 
                 # Check for exc_info=True in keyword arguments
                 for kw in node.keywords:
@@ -354,9 +385,9 @@ class LoggingASTVisitor(ast.NodeVisitor):
                     if self.file_path:
                         self.unknown_logger_var_files[var_name].add(self.file_path)
                 elif isinstance(node.func.value, ast.Attribute):
-                    # Track attribute access patterns (e.g., self._log)
-                    if isinstance(node.func.value.value, ast.Name):
-                        var_name = "{}.{}".format(node.func.value.value.id, node.func.value.attr)
+                    # Track attribute access patterns (e.g., self._log, self.foo._log)
+                    var_name = self._stringify_attribute_chain(node.func.value)
+                    if var_name:
                         self.unknown_logger_vars[var_name] += 1
                         if self.file_path:
                             self.unknown_logger_var_files[var_name].add(self.file_path)
@@ -426,55 +457,98 @@ class LoggingASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
     
     def _extract_error_template(self, node):
-        """Extract error message template from a logging call node."""
-        if not node.args:
-            return "<unknown>"
+        """Extract error message template from a logging call node. Returns (template, kind) where kind is 'static', 'dynamic', or 'unknown'."""
+        # Check for msg= keyword argument first
+        msg_expr = None
+        for kw in node.keywords:
+            if kw.arg == "msg":
+                msg_expr = kw.value
+                break
         
-        first_arg = node.args[0]
+        # Use msg= if present, otherwise first positional arg
+        if msg_expr is not None:
+            first_arg = msg_expr
+        elif node.args:
+            first_arg = node.args[0]
+        else:
+            return ("<unknown>", "unknown")
         
         # String literal (Python 2.7: use ast.Str)
         # This covers printf-style: logger.error("Failed %s", x) -> template = "Failed %s"
         if isinstance(first_arg, ast.Str):
             template = first_arg.s
+            kind = "static"
+        # Translation wrapper: _("msg") or gettext("msg") or ugettext("msg")
+        elif isinstance(first_arg, ast.Call) and isinstance(first_arg.func, ast.Name):
+            if first_arg.func.id in ("_", "gettext", "ugettext") and first_arg.args:
+                if isinstance(first_arg.args[0], ast.Str):
+                    template = first_arg.args[0].s
+                    kind = "static"
+                else:
+                    return ("<dynamic>", "dynamic")
+            else:
+                return ("<dynamic>", "dynamic")
         # % formatting: "x %s" % value -> template = "x %s"
         elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, ast.Mod):
             if isinstance(first_arg.left, ast.Str):
                 template = first_arg.left.s
+                kind = "static"
             else:
-                return "<dynamic>"
+                return ("<dynamic>", "dynamic")
         # .format() calls: "x {}".format(value) -> template = "x {}"
         elif isinstance(first_arg, ast.Call) and isinstance(first_arg.func, ast.Attribute):
             if first_arg.func.attr == "format" and isinstance(first_arg.func.value, ast.Str):
                 template = first_arg.func.value.s
+                kind = "static"
             else:
-                return "<dynamic>"
+                return ("<dynamic>", "dynamic")
+        # Variable reference: logger.error(msg) -> "<var:msg>"
+        elif isinstance(first_arg, ast.Name):
+            template = "<var:{}>".format(first_arg.id)
+            kind = "dynamic"
+        # Attribute reference: logger.error(self.msg) -> "<attr:self.msg>"
+        elif isinstance(first_arg, ast.Attribute):
+            attr_str = self._stringify_attribute_chain(first_arg)
+            template = "<attr:{}>".format(attr_str) if attr_str else "<dynamic>"
+            kind = "dynamic"
         # String concatenation (BinOp with Add)
         elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, ast.Add):
             # Try to extract literals, but mark as dynamic if complex
             try:
                 parts = []
-                self._extract_string_parts(first_arg, parts)
-                if parts:
+                has_non_literal = self._extract_string_parts(first_arg, parts)
+                if parts and not has_non_literal:
                     template = "".join(parts)
+                    kind = "static"
+                elif parts:
+                    # Mixed literals and non-literals -> normalize to {} placeholders
+                    template = "{}".join(parts) if len(parts) > 1 else "{}"
+                    kind = "dynamic"
                 else:
-                    return "<dynamic>"
+                    return ("<dynamic>", "dynamic")
             except:
-                return "<dynamic>"
+                return ("<dynamic>", "dynamic")
         else:
             # No extractable template
-            return "<unknown>"
+            return ("<unknown>", "unknown")
         
         # Normalize whitespace (collapse runs of spaces)
         template = re.sub(r'\s+', ' ', template.strip())
-        return template
+        return (template, kind)
     
     def _extract_string_parts(self, node, parts):
-        """Helper to extract string parts from string concatenation."""
+        """Helper to extract string parts from string concatenation. Returns True if non-literal parts found."""
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            self._extract_string_parts(node.left, parts)
-            self._extract_string_parts(node.right, parts)
+            has_non_literal_left = self._extract_string_parts(node.left, parts)
+            has_non_literal_right = self._extract_string_parts(node.right, parts)
+            return has_non_literal_left or has_non_literal_right
         elif isinstance(node, ast.Str):
             parts.append(node.s)
+            return False
+        else:
+            # Non-literal part found
+            parts.append("{}")
+            return True
     
     def check_json_formatting(self):
         """Check for JSON formatting indicators in config locations and file content."""
@@ -717,9 +791,11 @@ class RepoScanner:
             self.exception_stats["bare_except_blocks"].append((rel_path, line_no))
         
         # Track error templates (production only)
-        for template, level, line_no in visitor.error_templates:
-            self.error_templates.append((template, level, rel_path, line_no))
-            if template not in ("<dynamic>", "<unknown>"):
+        # Format: (template, kind, level, line_no) where kind is 'static', 'dynamic', or 'unknown'
+        for template, kind, level, line_no in visitor.error_templates:
+            self.error_templates.append((template, kind, level, rel_path, line_no))
+            # Only count static templates in unique template counts
+            if kind == "static" and template not in ("<dynamic>", "<unknown>"):
                 self.error_template_counts[template] += 1
                 self.error_template_files[template].add(rel_path)
         
@@ -762,8 +838,8 @@ class RepoScanner:
         # Mark as regex-scanned
         self.scan_coverage["python_files_scanned_regex"] += 1
         
-        # Regex patterns for logger calls
-        logger_pattern = re.compile(r'\b([A-Za-z_][A-Za-z0-9_\.]*?)\.(debug|info|warning|error|critical|exception)\s*\(')
+        # Regex patterns for logger calls (include warn/fatal aliases)
+        logger_pattern = re.compile(r'\b([A-Za-z_][A-Za-z0-9_\.]*?)\.(debug|info|warning|warn|error|critical|fatal|exception)\s*\(')
         print_pattern = re.compile(r'\bprint\s*\(')
         
         logging_calls = 0
@@ -772,14 +848,23 @@ class RepoScanner:
         
         lines = content.splitlines()
         for line_num, line in enumerate(lines, 1):
-            # Count print calls
+            # Count print calls (both print() and print statements)
             print_matches = print_pattern.findall(line)
             print_calls += len(print_matches)
+            # Also count Python 2 print statements: print "x"
+            if re.search(r'\bprint\s+["\']', line):
+                print_calls += 1
             
             # Find logger calls
             for match in logger_pattern.finditer(line):
                 logger_base, level = match.groups()
                 logging_calls += 1
+                
+                # Normalize aliases: warn -> warning, fatal -> critical
+                if level == "warn":
+                    level = "warning"
+                elif level == "fatal":
+                    level = "critical"
                 
                 # Extract error templates for error-like calls
                 if level in ("error", "exception", "critical"):
@@ -792,9 +877,14 @@ class RepoScanner:
                             error_templates_found.append((template, level, line_num))
         
         # Update global stats (classify as unknown/generic)
+        # Normalize aliases: warn -> warning, fatal -> critical
         level_counts = defaultdict(int)
         for match in logger_pattern.finditer(content):
             _, level = match.groups()
+            if level == "warn":
+                level = "warning"
+            elif level == "fatal":
+                level = "critical"
             if level == "exception":
                 level_counts["exception"] += 1
             else:
@@ -804,16 +894,17 @@ class RepoScanner:
             self.logging_stats["generic_logging"]["calls"][level] += count
             self.level_counts[level] += count
         
-        # Track error templates
+        # Track error templates (format: template, kind, level, file_path, line_no)
         for template, level, line_no in error_templates_found:
-            self.error_templates.append((template, level, rel_path, line_no))
-            if template not in ("<dynamic>", "<unknown>"):
-                self.error_template_counts[template] += 1
-                self.error_template_files[template].add(rel_path)
+            # Regex fallback returns simple template string, treat as dynamic
+            self.error_templates.append((template, "dynamic", level, rel_path, line_no))
+            # Don't count regex-extracted templates as static
         
-        # Update print counts
+        # Update print counts (check script-like markers)
         self.logging_stats["print_calls"] += print_calls
-        if "\\scripts\\" in rel_path.lower() or "/scripts/" in rel_path.lower():
+        file_path_lower = rel_path.lower()
+        is_script = any(marker in file_path_lower for marker in SCRIPT_PATH_MARKERS)
+        if is_script:
             self.logging_stats["print_calls_in_scripts"] += print_calls
         else:
             self.logging_stats["print_calls_outside_scripts"] += print_calls
@@ -1093,8 +1184,8 @@ class RepoScanner:
                 "critical_calls": self.level_counts.get("critical", 0),
                 "error_with_exc_info": self.exception_stats["exc_info_calls"],
                 "unique_templates": len(self.error_template_counts),
-                "dynamic_templates": sum(1 for t, _, _, _ in self.error_templates if t == "<dynamic>"),
-                "unknown_templates": sum(1 for t, _, _, _ in self.error_templates if t == "<unknown>"),
+                "dynamic_templates": sum(1 for _, kind, _, _, _ in self.error_templates if kind == "dynamic"),
+                "unknown_templates": sum(1 for _, kind, _, _, _ in self.error_templates if kind == "unknown"),
                 "top_templates": [
                     {
                         "template": template,
@@ -1105,10 +1196,7 @@ class RepoScanner:
                 ]
             },
             "_error_details": self.error_templates,  # Internal: full error details for top files calculation
-            "unknown_logger_vars": {
-                "top_vars": sorted(self.unknown_logger_vars.items(), key=lambda x: x[1], reverse=True)[:10],
-                "var_files": {var: list(files)[:5] for var, files in list(self.unknown_logger_var_files.items())[:10]}
-            },
+            "unknown_logger_vars": self._build_unknown_logger_vars_data(),
             "actionable_findings": {
                 "multiple_basic_config": multiple_basic_config,
                 "basic_config_count": basic_config_count,
@@ -1394,9 +1482,9 @@ class RepoScanner:
         
         # Top files by error-like calls
         if "error_logging" in data:
-            # Calculate top files by error calls
+            # Calculate top files by error calls (format: template, kind, level, file_path, line_no)
             file_error_counts = defaultdict(int)
-            for template, level, file_path, line_no in data.get("_error_details", []):
+            for template, kind, level, file_path, line_no in data.get("_error_details", []):
                 if level in ("error", "exception", "critical"):
                     file_error_counts[file_path] += 1
             top_error_files = sorted(file_error_counts.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -1438,7 +1526,7 @@ class RepoScanner:
         if "_consistency_check" in data:
             check = data["_consistency_check"]
             if not check["matches"]:
-                lines.append("## ⚠️ INTERNAL CONSISTENCY CHECK FAILED")
+                lines.append("## WARNING: INTERNAL CONSISTENCY CHECK FAILED")
                 lines.append("")
                 lines.append("**WARNING:** The level distribution total does not match the total logger calls!")
                 lines.append("")
@@ -1455,7 +1543,7 @@ class RepoScanner:
             error_data = data["error_logging"]
             error_sum = error_data.get("error_calls", 0) + error_data.get("exception_calls", 0) + error_data.get("critical_calls", 0)
             if error_sum != error_data.get("total_error_calls", 0):
-                lines.append("## ⚠️ CONSISTENCY WARNING")
+                lines.append("## WARNING: CONSISTENCY WARNING")
                 lines.append("")
                 lines.append("Error-like call breakdown does not match total:")
                 lines.append("- ERROR + EXCEPTION + CRITICAL = **{}**".format(error_sum))
@@ -1512,7 +1600,7 @@ class RepoScanner:
         
         # Multiple basicConfig
         if findings["multiple_basic_config"]:
-            lines.append("⚠️ **Multiple `basicConfig()` calls detected:** {}".format(findings['basic_config_count']))
+            lines.append("WARNING: **Multiple `basicConfig()` calls detected:** {}".format(findings['basic_config_count']))
             lines.append("")
             lines.append("Having multiple `basicConfig()` calls can cause configuration conflicts. Consider consolidating to a single configuration point.")
             lines.append("")
@@ -1520,13 +1608,13 @@ class RepoScanner:
             lines.append("|------|------|------------------------|")
             for cfg in findings["basic_config_locations"]:
                 entry_point = cfg.get("entry_point_likelihood", "unknown")
-                risk = "⚠️ High risk" if entry_point == "import-time" else "✓ Lower risk"
+                risk = "WARNING: High risk" if entry_point == "import-time" else "OK: Lower risk"
                 lines.append("| `{}` | {} | {} ({}) |".format(cfg['file'], cfg['line'], entry_point, risk))
             lines.append("")
         
         # High print() counts outside scripts/
         if findings["high_print_counts_outside_scripts"]:
-            lines.append("⚠️ **High `print()` usage outside scripts/ directories:**")
+            lines.append("WARNING: **High `print()` usage outside scripts/ directories:**")
             lines.append("")
             lines.append("| File | Print Calls |")
             lines.append("|------|-------------|")
@@ -1538,7 +1626,7 @@ class RepoScanner:
         
         # Files with both print() and logger calls
         if findings["files_with_both_print_and_logger"]:
-            lines.append("⚠️ **Files using both `print()` and logger calls:**")
+            lines.append("WARNING: **Files using both `print()` and logger calls:**")
             lines.append("")
             lines.append("| File | Print Calls | Logger Calls |")
             lines.append("|------|-------------|-------------|")
@@ -1550,20 +1638,20 @@ class RepoScanner:
         
         # JSON logging status
         if findings["json_logging_enabled"]:
-            lines.append("✅ **JSON logging is enabled:**")
+            lines.append("OK: **JSON logging is enabled:**")
             lines.append("")
             for cfg in findings["json_logging_locations"]:
                 lines.append("- `{}:{}` ({})".format(cfg['file'], cfg['line'], cfg['config_type']))
             lines.append("")
         else:
-            lines.append("ℹ️ **JSON logging not detected**")
+            lines.append("INFO: **JSON logging not detected**")
             lines.append("")
             lines.append("Consider enabling JSON formatting for structured logging, especially in production environments.")
             lines.append("")
         
         # structlog configured but unused
         if findings.get("structlog_configured_but_unused"):
-            lines.append("⚠️ **structlog configured but not used (or under-detected):**")
+            lines.append("WARNING: **structlog configured but not used (or under-detected):**")
             lines.append("")
             lines.append("structlog.configure() was found, but no structlog method calls were detected.")
             lines.append("This may indicate:")
@@ -1575,7 +1663,7 @@ class RepoScanner:
         
         # High unknown logger usage
         if findings.get("high_unknown_logger_usage"):
-            lines.append("⚠️ **High unknown/generic logger usage detected:** {:.1f}%".format(findings.get('unknown_logger_percentage', 0)))
+            lines.append("WARNING: **High unknown/generic logger usage detected:** {:.1f}%".format(findings.get('unknown_logger_percentage', 0)))
             lines.append("")
             lines.append("A significant portion of logger calls could not be classified as stdlib or structlog.")
             lines.append("This may indicate:")
@@ -1586,7 +1674,7 @@ class RepoScanner:
         
         # High dynamic error templates
         if findings.get("high_dynamic_error_templates"):
-            lines.append("⚠️ **High percentage of dynamic error templates:** {:.1f}%".format(findings.get('dynamic_error_percentage', 0)))
+            lines.append("WARNING: **High percentage of dynamic error templates:** {:.1f}%".format(findings.get('dynamic_error_percentage', 0)))
             lines.append("")
             lines.append("Many error messages use f-strings or string concatenation, making it difficult to")
             lines.append("track unique error patterns. Consider using structured logging with consistent")
