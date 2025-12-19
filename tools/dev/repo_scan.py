@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """
-READ-ONLY logging audit tool for Python repositories.
+STRICTLY READ-ONLY production logging audit tool for Python repositories.
 
-Scans a repository for logging patterns, configuration points, and generates
-actionable findings in human-readable Markdown reports or JSON for automation.
+Scans production code (excludes tests) for logging patterns and generates
+a human-readable Markdown report to STDOUT only.
 
 Features:
-- Detects stdlib logging, structlog, and generic logger usage
-- Identifies logging configuration points (basicConfig, dictConfig, fileConfig, structlog.configure)
-- Tracks print() usage and identifies files mixing print() with logging
+- Detects stdlib logging, structlog, and generic logger usage (production code only)
+- Quantifies error logging (total calls + unique message templates)
+- Identifies logging configuration points and entry-point risks
+- Tracks print() usage in production code
 - Detects JSON logging configuration
 - Provides actionable findings for logging improvements
 
-Guarantee:
-- This script only READS files.
-- It never writes files, creates directories, or modifies anything.
-- Output is printed to STDOUT only (users can redirect output themselves).
+ABSOLUTE SAFETY GUARANTEE:
+- This script ONLY READS files.
+- It NEVER writes, creates, modifies, renames, or deletes ANY files or directories.
+- Output is printed to STDOUT ONLY (no --out flag, no file writing).
+- No temp files, no logging to disk, no filesystem modifications.
 
 Usage:
-    python tools/dev/repo_scan.py --root /path/to/repo [--format md|json]
-    python tools/dev/repo_scan.py --root /path/to/repo > report.md
+    python tools/dev/repo_scan.py --root /path/to/repo
+    python tools/dev/repo_scan.py --root /path/to/repo > report.md  # Redirect stdout yourself
 """
 
 from __future__ import print_function
@@ -565,23 +567,19 @@ class RepoScanner:
         rel_path = str(filepath.relative_to(self.root))
         rel_path_lower = rel_path.lower()
         filename = filepath.name.lower()
+        path_parts = [p.lower() for p in filepath.parts]
         
-        # Check for test directories
-        if "\\tests\\" in rel_path or "/tests/" in rel_path_lower:
-            return True
-        if "\\test\\" in rel_path or "/test/" in rel_path_lower:
-            return True
-        if "tests\\" in rel_path or "tests/" in rel_path_lower:
-            return True
-        if "test\\" in rel_path or "test/" in rel_path_lower:
+        # Check for test directories (exact matches in path parts)
+        test_dir_patterns = {"tests", "test", "__tests__", "fixtures", "testdata", "sample_repo"}
+        if any(part in test_dir_patterns for part in path_parts):
             return True
         
         # Check for test file patterns
         if filename.startswith("test_") or filename.endswith("_test.py"):
             return True
         
-        # Check for fixtures directories
-        if "fixtures" in rel_path_lower and ("test" in rel_path_lower or "tests" in rel_path_lower):
+        # Check for fixture/fixtures in path
+        if "fixture" in rel_path_lower:
             return True
         
         return False
@@ -589,7 +587,9 @@ class RepoScanner:
     def is_self_file(self, filepath: Path) -> bool:
         """Check if file is the scanner itself (always exclude)."""
         rel_path = str(filepath.relative_to(self.root))
-        return rel_path.replace("\\", "/") == "tools/dev/repo_scan.py"
+        normalized = rel_path.replace("\\", "/")
+        # Exclude the scanner script itself
+        return normalized == "tools/dev/repo_scan.py" or filepath.name == "repo_scan.py"
     
     def analyze_python_file(self, filepath: Path, content: str) -> Dict[str, Any]:
         """Analyze a Python file using AST."""
@@ -745,6 +745,12 @@ class RepoScanner:
                     if self.is_test_file(filepath):
                         self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
                         continue
+                    
+                    # Skip tools/dev/ and tools/ directories (optional: treat as non-production)
+                    # Uncomment below if you want to exclude all tools/ directories:
+                    # if "tools" in path_parts and "dev" in path_parts:
+                    #     self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
+                    #     continue
                     
                     # Skip if in ignored directory
                     if self.should_ignore_for_content_scan(filepath):
@@ -958,6 +964,20 @@ class RepoScanner:
         if "total_lines" in data["meta"]:
             lines.append("**Total Lines (Physical):** " + str(data["meta"]["total_lines"]))
             lines.append("**Non-Empty Lines:** " + str(data["meta"]["non_empty_lines"]))
+            lines.append("")
+        
+        # Production Scope / Exclusions summary
+        lines.append("## Production Scope / Exclusions")
+        lines.append("")
+        lines.append("This audit scans **production code only**. The following are excluded:")
+        lines.append("")
+        lines.append("- Test files: `test_*.py`, `*_test.py`")
+        lines.append("- Test directories: `tests/`, `test/`, `__tests__/`, `fixtures/`, `testdata/`, `sample_repo/`")
+        lines.append("- Scanner script itself: `tools/dev/repo_scan.py`")
+        lines.append("")
+        skipped_count = data["scan_coverage"]["python_files_skipped"]["ignored_path"]
+        if skipped_count > 0:
+            lines.append(f"**Total files excluded:** {skipped_count}")
             lines.append("")
         
         # Scan Coverage
@@ -1379,12 +1399,9 @@ Examples:
   
   # Save output to file (redirect stdout):
   python tools/dev/repo_scan.py --root /path/to/repo > report.md
-  
-  # JSON output:
-  python tools/dev/repo_scan.py --root /path/to/repo --format json > report.json
 
-Note: This script is STRICTLY READ-ONLY. It never writes files or creates directories.
-      Redirect stdout yourself if you want to save the output.
+Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or deletes any files.
+      All output goes to STDOUT only. Redirect stdout yourself if you want to save the output.
         """
     )
     parser.add_argument(
@@ -1393,25 +1410,7 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         default=None,
         help=f"Root directory to scan (default: {default_root})"
     )
-    parser.add_argument(
-        "--format",
-        choices=["md", "json"],
-        default="md",
-        help="Output format: 'md' for Markdown (default), 'json' for JSON"
-    )
-    parser.add_argument(
-        "--out",
-        type=str,
-        default=None,
-        help="Output file path (optional). If not provided, output goes to stdout. "
-             "MUST be outside the scanned repository root unless --allow-write-in-repo is used."
-    )
-    parser.add_argument(
-        "--allow-write-in-repo",
-        action="store_true",
-        default=False,
-        help="Allow writing output file inside the repository root (not recommended)"
-    )
+    # No output flags - STDOUT only, strictly read-only (no file writing)
     parser.add_argument(
         "--include-cache-metrics",
         action="store_true",
@@ -1428,22 +1427,6 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         print(f"Error: Root directory does not exist: {root}", file=sys.stderr)
         return 1
     
-    # Check if --out path is inside repo root (prevent writing inside by default)
-    if args.out:
-        out_path = Path(args.out).resolve()
-        try:
-            # Check if output path is inside or equal to repo root
-            out_path.relative_to(root)
-            # Output path is inside repo root
-            if not args.allow_write_in_repo:
-                print(f"Error: Output path '{out_path}' is inside the scanned repository root '{root}'.", file=sys.stderr)
-                print("This script is STRICTLY READ-ONLY and cannot write files inside the repository.", file=sys.stderr)
-                print("Please specify an output path outside the repository root, or use --allow-write-in-repo flag.", file=sys.stderr)
-                return 1
-        except ValueError:
-            # Good - output path is outside repo root
-            pass
-    
     # Perform scan
     scanner = RepoScanner(str(root), include_cache_metrics=args.include_cache_metrics)
     try:
@@ -1455,33 +1438,18 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
     # Get report data
     report_data = scanner.get_report_data()
     
-    # Format output
-    if args.format == "json":
-        output = json.dumps(report_data, indent=2, ensure_ascii=False)
-    else:
-        output = scanner.format_markdown(report_data)
+    # Format output as Markdown (STDOUT only - strictly read-only, no file writing)
+    output = scanner.format_markdown(report_data)
     
-    # Write output
-    if args.out:
-        # Write to file (outside repo root, already validated)
-        try:
-            out_path = Path(args.out).resolve()
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(out_path, "w", encoding="utf-8", errors="replace") as f:
-                f.write(output)
-        except Exception as e:
-            print(f"Error writing to output file: {e}", file=sys.stderr)
-            return 1
-    else:
-        # Write to stdout with UTF-8 encoding
-        try:
-            if hasattr(sys.stdout, "reconfigure"):
-                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-            sys.stdout.write(output)
-            sys.stdout.flush()
-        except (UnicodeEncodeError, AttributeError):
-            # Fallback for Python 2 or systems without reconfigure
-            print(output.encode("utf-8", errors="replace").decode("utf-8", errors="replace"))
+    # Write to stdout with UTF-8 encoding (ONLY output method - no files)
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.write(output)
+        sys.stdout.flush()
+    except (UnicodeEncodeError, AttributeError):
+        # Fallback for Python 2 or systems without reconfigure
+        print(output.encode("utf-8", errors="replace").decode("utf-8", errors="replace"))
     
     return 0
 
