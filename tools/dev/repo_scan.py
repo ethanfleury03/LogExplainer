@@ -28,6 +28,7 @@ from __future__ import print_function
 
 import argparse
 import ast
+import fnmatch
 import json
 import os
 import re
@@ -273,9 +274,10 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 # Check for exc_info=True in keyword arguments
                 for kw in node.keywords:
                     if kw.arg == "exc_info":
-                        # Handle both ast.NameConstant (Python <3.8) and ast.Constant (Python 3.8+)
-                        if (isinstance(kw.value, ast.NameConstant) and kw.value.value is True) or \
-                           (isinstance(kw.value, ast.Constant) and kw.value.value is True):
+                        # Handle both ast.Constant (Python 3.8+) and ast.NameConstant (Python <3.8)
+                        if isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                            self.exc_info_calls += 1
+                        elif isinstance(kw.value, ast.NameConstant) and kw.value.value is True:  # Python <3.8 compatibility
                             self.exc_info_calls += 1
                 
                 # Check if it's logging.info(...) - direct stdlib call
@@ -409,20 +411,19 @@ class LoggingASTVisitor(ast.NodeVisitor):
         
         first_arg = node.args[0]
         
-        # String literal
-        if isinstance(first_arg, ast.Str):
-            template = first_arg.s
-        # Python 3.8+ Constant
-        elif isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+        # String literal (handle both old ast.Str and new ast.Constant)
+        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
             template = first_arg.value
+        elif isinstance(first_arg, ast.Str):  # Python <3.8 compatibility
+            template = first_arg.s
         # f-string (JoinedStr)
         elif isinstance(first_arg, ast.JoinedStr):
             parts = []
             for value in first_arg.values:
-                if isinstance(value, ast.Str):
-                    parts.append(value.s)
-                elif isinstance(value, ast.Constant) and isinstance(value.value, str):
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
                     parts.append(value.value)
+                elif isinstance(value, ast.Str):  # Python <3.8 compatibility
+                    parts.append(value.s)
                 else:
                     parts.append("{...}")
             template = "".join(parts)
@@ -450,10 +451,10 @@ class LoggingASTVisitor(ast.NodeVisitor):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             self._extract_string_parts(node.left, parts)
             self._extract_string_parts(node.right, parts)
-        elif isinstance(node, ast.Str):
-            parts.append(node.s)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             parts.append(node.value)
+        elif isinstance(node, ast.Str):  # Python <3.8 compatibility
+            parts.append(node.s)
     
     def check_json_formatting(self):
         """Check for JSON formatting indicators in config locations and file content."""
@@ -504,7 +505,9 @@ class RepoScanner:
             "python_files_discovered": 0,
             "python_files_scanned": 0,
             "python_files_skipped": {
-                "ignored_path": [],
+                "test_file": [],  # Test files (test_*.py, *_test.py, in test dirs)
+                "self_file": [],  # Scanner script itself
+                "ignored_path": [],  # Other ignored paths
                 "decode_error": [],
                 "read_error": [],
                 "parse_error": []
@@ -574,8 +577,15 @@ class RepoScanner:
         if any(part in test_dir_patterns for part in path_parts):
             return True
         
-        # Check for test file patterns
-        if filename.startswith("test_") or filename.endswith("_test.py"):
+        # Check for test file patterns (case-insensitive, more robust)
+        # test_*.py pattern
+        if filename.startswith("test_") and filename.endswith(".py"):
+            return True
+        # *_test.py pattern
+        if filename.endswith("_test.py"):
+            return True
+        # test*.py pattern (catches testLoggingCompatibility.py, etc.)
+        if fnmatch.fnmatch(filename, "test*.py"):
             return True
         
         # Check for fixture/fixtures in path
@@ -592,8 +602,20 @@ class RepoScanner:
         return normalized == "tools/dev/repo_scan.py" or filepath.name == "repo_scan.py"
     
     def analyze_python_file(self, filepath: Path, content: str) -> Dict[str, Any]:
-        """Analyze a Python file using AST."""
+        """Analyze a Python file using AST. Defensive check: should never be called for excluded files."""
         rel_path = str(filepath.relative_to(self.root))
+        
+        # Defensive check: ensure this file should be analyzed (should never trigger if exclusion works)
+        if self.is_self_file(filepath) or self.is_test_file(filepath) or self.should_ignore_for_content_scan(filepath):
+            # This should never happen, but if it does, return zero counts
+            return {
+                "path": rel_path,
+                "logging_calls": 0,
+                "print_calls": 0,
+                "total_lines": 0,
+                "non_empty_lines": 0,
+                "error": "excluded_file"
+            }
         
         # Count LOC (total lines and non-empty lines)
         total_lines = len(content.splitlines())
@@ -736,25 +758,18 @@ class RepoScanner:
                     # Count all discovered Python files
                     self.scan_coverage["python_files_discovered"] += 1
                     
-                    # Skip self (repo_scan.py) - always exclude
+                    # Determine skip reason (single gate - files are excluded BEFORE analysis)
+                    skip_reason = None
                     if self.is_self_file(filepath):
-                        self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
-                        continue
+                        skip_reason = "self_file"
+                    elif self.is_test_file(filepath):
+                        skip_reason = "test_file"
+                    elif self.should_ignore_for_content_scan(filepath):
+                        skip_reason = "ignored_path"
                     
-                    # Skip test files (production-only audit) - always exclude
-                    if self.is_test_file(filepath):
-                        self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
-                        continue
-                    
-                    # Skip tools/dev/ and tools/ directories (optional: treat as non-production)
-                    # Uncomment below if you want to exclude all tools/ directories:
-                    # if "tools" in path_parts and "dev" in path_parts:
-                    #     self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
-                    #     continue
-                    
-                    # Skip if in ignored directory
-                    if self.should_ignore_for_content_scan(filepath):
-                        self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
+                    # Skip excluded files BEFORE reading/parsing/analyzing
+                    if skip_reason:
+                        self.scan_coverage["python_files_skipped"][skip_reason].append(rel_path)
                         continue
                     
                     # Read and analyze
@@ -821,6 +836,15 @@ class RepoScanner:
         )
         high_unknown_usage = total_all_calls > 0 and (total_generic_calls / total_all_calls) > 0.1  # >10% unknown
         
+        # Internal consistency validation: level distribution must equal total logger calls
+        level_sum = sum(self.level_counts.values())
+        consistency_check = {
+            "level_sum": level_sum,
+            "total_calls": total_all_calls,
+            "matches": level_sum == total_all_calls,
+            "difference": level_sum - total_all_calls
+        }
+        
         # Error template statistics
         dynamic_template_count = sum(1 for t, _, _, _ in self.error_templates if t == "<dynamic>")
         unknown_template_count = sum(1 for t, _, _, _ in self.error_templates if t == "<unknown>")
@@ -843,13 +867,17 @@ class RepoScanner:
                 "python_files_discovered": self.scan_coverage["python_files_discovered"],
                 "python_files_scanned": self.scan_coverage["python_files_scanned"],
                 "python_files_skipped": {
+                    "test_file": len(self.scan_coverage["python_files_skipped"]["test_file"]),
+                    "self_file": len(self.scan_coverage["python_files_skipped"]["self_file"]),
                     "ignored_path": len(self.scan_coverage["python_files_skipped"]["ignored_path"]),
                     "decode_error": len(self.scan_coverage["python_files_skipped"]["decode_error"]),
                     "read_error": len(self.scan_coverage["python_files_skipped"]["read_error"]),
                     "parse_error": len(self.scan_coverage["python_files_skipped"]["parse_error"])
                 },
                 "skipped_files_detail": {
-                    "ignored_path": self.scan_coverage["python_files_skipped"]["ignored_path"][:20],  # Limit for report
+                    "test_file": self.scan_coverage["python_files_skipped"]["test_file"][:20],
+                    "self_file": self.scan_coverage["python_files_skipped"]["self_file"][:20],
+                    "ignored_path": self.scan_coverage["python_files_skipped"]["ignored_path"][:20],
                     "decode_error": self.scan_coverage["python_files_skipped"]["decode_error"][:20],
                     "read_error": self.scan_coverage["python_files_skipped"]["read_error"][:20],
                     "parse_error": self.scan_coverage["python_files_skipped"]["parse_error"][:20]
@@ -940,7 +968,8 @@ class RepoScanner:
                 "high_dynamic_error_templates": high_dynamic_errors,
                 "dynamic_error_percentage": (dynamic_template_count / total_error_calls * 100) if total_error_calls > 0 else 0,
                 "unknown_error_percentage": (unknown_template_count / total_error_calls * 100) if total_error_calls > 0 else 0
-            }
+            },
+            "_consistency_check": consistency_check  # Internal validation
         }
         
         # Add cache metrics if enabled
@@ -975,7 +1004,11 @@ class RepoScanner:
         lines.append("- Test directories: `tests/`, `test/`, `__tests__/`, `fixtures/`, `testdata/`, `sample_repo/`")
         lines.append("- Scanner script itself: `tools/dev/repo_scan.py`")
         lines.append("")
-        skipped_count = data["scan_coverage"]["python_files_skipped"]["ignored_path"]
+        skipped_count = (
+            data["scan_coverage"]["python_files_skipped"].get("test_file", 0) +
+            data["scan_coverage"]["python_files_skipped"].get("self_file", 0) +
+            data["scan_coverage"]["python_files_skipped"].get("ignored_path", 0)
+        )
         if skipped_count > 0:
             lines.append(f"**Total files excluded:** {skipped_count}")
             lines.append("")
@@ -1002,7 +1035,25 @@ class RepoScanner:
         
         # Show sample skipped files if any
         skipped_detail = coverage["skipped_files_detail"]
-        if skipped_detail["ignored_path"]:
+        
+        # Test files (most important to show)
+        if skipped_detail.get("test_file"):
+            lines.append("**Sample skipped files (test files):**")
+            for f in skipped_detail["test_file"][:10]:
+                lines.append(f"- `{f}`")
+            if len(skipped_detail["test_file"]) > 10:
+                lines.append(f"- ... and {len(skipped_detail['test_file']) - 10} more")
+            lines.append("")
+        
+        # Self file
+        if skipped_detail.get("self_file"):
+            lines.append("**Skipped files (scanner script):**")
+            for f in skipped_detail["self_file"]:
+                lines.append(f"- `{f}`")
+            lines.append("")
+        
+        # Other ignored paths
+        if skipped_detail.get("ignored_path"):
             lines.append("**Sample skipped files (ignored path):**")
             for f in skipped_detail["ignored_path"][:5]:
                 lines.append(f"- `{f}`")
@@ -1219,6 +1270,23 @@ class RepoScanner:
         lines.append(f"*Note: Total logger calls = {total_logger_calls}. Level distribution sums must match this total.*")
         lines.append("")
         
+        # Internal consistency check
+        if "_consistency_check" in data:
+            check = data["_consistency_check"]
+            if not check["matches"]:
+                lines.append("## ⚠️ INTERNAL CONSISTENCY CHECK FAILED")
+                lines.append("")
+                lines.append("**WARNING:** The level distribution total does not match the total logger calls!")
+                lines.append("")
+                lines.append(f"- Level distribution sum: **{check['level_sum']}**")
+                lines.append(f"- Total logger calls: **{check['total_calls']}**")
+                lines.append(f"- Difference: **{check['difference']}**")
+                lines.append("")
+                lines.append("This indicates a counting bug. Some files may be partially counted.")
+                lines.append("Please report this issue.")
+                lines.append("")
+        lines.append("")
+        
         # Logger Configuration
         lines.append("## Logger Configuration Overview")
         lines.append("")
@@ -1384,7 +1452,8 @@ def main():
     # Determine default root (script_dir/../..)
     script_path = Path(__file__).resolve()
     script_dir = script_path.parent
-    default_root = (script_dir / ".." / "..").resolve()
+    # Go up two levels: tools/dev -> tools -> repo root
+    default_root = script_dir.parent.parent.resolve()
     
     parser = argparse.ArgumentParser(
         description="Logging audit tool for Python repositories (STRICTLY READ-ONLY)",
@@ -1421,10 +1490,16 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
     args = parser.parse_args()
     
     # Resolve root directory (use default if not provided)
-    root = Path(args.root).resolve() if args.root else default_root
+    if args.root:
+        # Normalize the path to handle any weird shell parsing
+        root_str = str(args.root).strip().strip('"').strip("'")
+        root = Path(root_str).resolve()
+    else:
+        root = default_root
     
     if not root.exists():
         print(f"Error: Root directory does not exist: {root}", file=sys.stderr)
+        print(f"  (Resolved from: {args.root if args.root else 'default'})", file=sys.stderr)
         return 1
     
     # Perform scan
