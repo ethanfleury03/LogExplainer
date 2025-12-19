@@ -68,4 +68,65 @@ Notes for maintainers:
 - Python import/package: `log_explainer` (underscores are required for Python imports)
 - With the `src/` layout, the package lives at: `LogExplainer/src/log_explainer/`
 
+## Manual Testing Instructions
+
+### Demo Mode
+
+1. Set the demo root environment variable:
+   ```bash
+   export ARROW_LOG_HELPER_DEMO_ROOT=tests/fixtures/sample_repo
+   ```
+
+2. Run the GUI:
+   ```bash
+   python RUN_ME.py
+   ```
+
+3. Test the following features:
+   - Verify the scan roots display shows the demo root
+   - Paste a sample log line (e.g., from `tests/fixtures/sample_repo`):
+     ```
+     2025-12-19T05:22:06.895453+11:00 RS20300529 Kareela0: <E> [#4] PeriodicIdle: waitComplete for localhost:9210:Dyn-ultron:VALVE
+     ```
+   - Click "Analyze" and verify:
+     - Match list populates with confidence percentages and locations
+     - Status updates during scanning
+     - Selecting a match updates the right detail view
+     - Summary section shows function/enclosure info
+     - Metadata section shows key/value pairs
+     - Code Block tab shows extracted code
+     - Matched Line tab shows the exact matched line
+     - Raw JSON tab shows the structured bundle
+   - Click "Export JSON" and verify file is created in DATA_DIR
+   - Click "Copy JSON" and verify JSON is copied to clipboard
+   - Click "Help" to view safety guarantees
+
+### Real Scan Mode
+
+1. Set scan roots to a real codebase path:
+   ```bash
+   export ARROW_LOG_HELPER_ROOTS=/opt/memjet
+   ```
+   Or use the "Change..." button in the GUI to set roots interactively.
+
+2. Run the GUI:
+   ```bash
+   python RUN_ME.py
+   ```
+
+3. Paste a real log line from the printer software
+
+4. Click "Analyze" and verify:
+   - All matches are listed with confidence percentages
+   - Match details are correctly displayed
+   - Export and Copy JSON work correctly
+
+### Running Unit Tests
+
+Run all unit tests including the new ui_bundle tests:
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"
+```
+
 

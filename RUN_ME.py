@@ -3,6 +3,9 @@ from __future__ import absolute_import, print_function
 import os
 import sys
 
+# Prevent pycache creation on target machine
+sys.dont_write_bytecode = True
+
 
 def _repo_root():
     return os.path.abspath(os.path.dirname(__file__))
