@@ -1123,9 +1123,9 @@ class RepoScanner:
             "difference": level_sum - total_all_calls
         }
         
-        # Error template statistics
-        dynamic_template_count = sum(1 for t, _, _, _ in self.error_templates if t == "<dynamic>")
-        unknown_template_count = sum(1 for t, _, _, _ in self.error_templates if t == "<unknown>")
+        # Error template statistics (format: template, kind, level, file_path, line_no)
+        dynamic_template_count = sum(1 for _, kind, _, _, _ in self.error_templates if kind == "dynamic")
+        unknown_template_count = sum(1 for _, kind, _, _, _ in self.error_templates if kind == "unknown")
         total_error_calls = (
             self.level_counts.get("error", 0) +
             self.level_counts.get("exception", 0) +
