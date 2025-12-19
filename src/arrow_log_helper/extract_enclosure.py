@@ -275,6 +275,53 @@ def _extract_leading_comment_block(lines, def_line_no, max_window=25):
     return (None, None, None)
 
 
+def extract_context_preview(path, match_line_no, context_lines=10):
+    """
+    Extract a small code snippet around the matched line with line numbers.
+    
+    Args:
+        path: File path to read
+        match_line_no: 1-based line number of the match
+        context_lines: Number of lines before/after to include (default 10)
+    
+    Returns:
+        str: Formatted preview with line numbers, e.g. "927: ...\n928: ...\n...\n937: logger.error(...)\n...\n947: ..."
+        Returns None if file cannot be read.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    
+    lines = _safe_read_lines(path)
+    n = len(lines)
+    if n == 0:
+        return None
+    
+    # Convert to 0-based index, ensure valid
+    try:
+        match_line_1based = int(match_line_no)
+        match_idx = match_line_1based - 1
+    except Exception:
+        match_idx = 0
+    
+    if match_idx < 0:
+        match_idx = 0
+    if match_idx >= n:
+        match_idx = n - 1
+    
+    # Calculate bounds (clamp to file boundaries)
+    start_idx = max(0, match_idx - context_lines)
+    end_idx = min(n - 1, match_idx + context_lines)
+    
+    # Build preview with line numbers
+    preview_lines = []
+    for i in range(start_idx, end_idx + 1):
+        line_num = i + 1  # 1-based line number
+        line_text = lines[i] if i < len(lines) else ""
+        preview_lines.append("%d: %s" % (line_num, line_text))
+    
+    return "\n".join(preview_lines)
+
+
 def extract_enclosure(path, match_line_no, context_fallback=50):
     """
     Extract enclosing def/class for a match location with guaranteed containment.

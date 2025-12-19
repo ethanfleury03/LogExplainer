@@ -170,10 +170,20 @@ def analyze(text, settings=None, progress_cb=None, defaults_module=None):
         merged["leading_comment_block"] = enc.get("leading_comment_block")
         merged["leading_comment_start_line"] = enc.get("leading_comment_start_line")
         merged["leading_comment_end_line"] = enc.get("leading_comment_end_line")
-        if signature is None and enc.get("enclosure_type") in ("none", "window", "module"):
-            merged["context_preview"] = enc.get("block")
-        else:
-            merged["context_preview"] = None
+        
+        # Extract context preview around the matched line (for all match types)
+        try:
+            context_preview = extract_enclosure.extract_context_preview(
+                m.get("path"), m.get("line_no"), context_lines=10
+            )
+            merged["context_preview"] = context_preview
+        except Exception:
+            # Fallback: use enclosure block if available, otherwise None
+            if signature is None and enc.get("enclosure_type") in ("none", "window", "module"):
+                merged["context_preview"] = enc.get("block")
+            else:
+                merged["context_preview"] = None
+        
         if enc.get("notes"):
             merged["notes"] = enc.get("notes")
         enriched.append(merged)
