@@ -541,10 +541,10 @@ class ArrowLogHelperApp(object):
                     hits_found = int(stats.get("hits_found", 0))
                     elapsed = float(stats.get("elapsed_seconds", 0.0))
                     msg = "Scanning... %d files, %d hits, %.1fs" % (files_scanned, hits_found, elapsed)
-                stopped = stats.get("stopped_reason")
-                if stopped:
-                    msg += " (stopped: %s)" % (_safe_text(stopped),)
-                self._set_status(msg)
+                    stopped = stats.get("stopped_reason")
+                    if stopped:
+                        msg += " (stopped: %s)" % (_safe_text(stopped),)
+                    self._set_status(msg)
                 except Exception:
                     pass
             if progress_queue:
