@@ -10,11 +10,22 @@ def _make_json_serializable(obj):
         return None
     if isinstance(obj, (bool, int, float)):
         return obj
-    if isinstance(obj, (str, unicode)):  # noqa: F821  (py2 only)
-        try:
-            return str(obj)
-        except Exception:
-            return repr(obj)
+    # Handle string types (str in py3, str/unicode in py2)
+    try:
+        # Check if unicode type exists (Python 2)
+        unicode_type = unicode  # noqa: F821
+        if isinstance(obj, (str, unicode_type)):
+            try:
+                return str(obj)
+            except Exception:
+                return repr(obj)
+    except NameError:
+        # Python 3: unicode doesn't exist, all strings are str
+        if isinstance(obj, str):
+            try:
+                return str(obj)
+            except Exception:
+                return repr(obj)
     if isinstance(obj, bytes):
         try:
             return obj.decode("utf-8", "replace")
