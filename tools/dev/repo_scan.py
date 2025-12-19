@@ -159,16 +159,9 @@ class LoggingASTVisitor(ast.NodeVisitor):
                     logger_type = "stdlib"
                     
                     # Check for framework loggers
-                    if (len(call.args) > 0):
-                        arg = call.args[0]
-                        # Handle both ast.Str (Python <3.8) and ast.Constant (Python 3.8+)
-                        if isinstance(arg, ast.Str):
-                            logger_name = arg.s
-                        elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                            logger_name = arg.value
-                        else:
-                            logger_name = None
-                        
+                    if (len(call.args) > 0 and 
+                        isinstance(call.args[0], ast.Str)):
+                        logger_name = call.args[0].s
                         if logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access", 
                                          "gunicorn", "gunicorn.error", "gunicorn.access"):
                             logger_type = "framework"
@@ -236,12 +229,8 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 
                 # Check for exc_info=True in keyword arguments
                 for kw in node.keywords:
-                    if kw.arg == "exc_info":
-                        # Handle both ast.NameConstant (Python <3.8) and ast.Constant (Python 3.8+)
-                        if isinstance(kw.value, ast.NameConstant) and kw.value.value is True:
-                            self.exc_info_calls += 1
-                        elif isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                            self.exc_info_calls += 1
+                    if kw.arg == "exc_info" and isinstance(kw.value, ast.NameConstant) and kw.value.value is True:
+                        self.exc_info_calls += 1
                 
                 # Check if it's logging.info(...) - direct stdlib call
                 if (isinstance(node.func.value, ast.Name) and 
@@ -661,6 +650,11 @@ class RepoScanner:
                 },
                 "framework_logging": {
                     "method_calls": dict(self.logging_stats["framework_logging"]["calls"])
+                },
+                "loguru": {
+                    "imports": self.logging_stats["loguru"]["imports"],
+                    "get_logger_calls": self.logging_stats["loguru"]["get_logger"],
+                    "method_calls": dict(self.logging_stats["loguru"]["calls"])
                 },
                 "generic_logging": {
                     "method_calls": dict(self.logging_stats["generic_logging"]["calls"])
