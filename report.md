@@ -1,10 +1,24 @@
 # Repository Scan Report
 
 **Repo Path:** `C:\Users\ethan\ArrowSystems\backend`
-**Scan Timestamp:** 2025-12-19 11:06:22
-**Total Files Scanned:** 94
-**Python Files:** 94
-**Exclusions:** .cache, .env, .git, .hg, .idea, .mypy_cache, .next, .pytest_cache, .ruff_cache, .svn...
+**Scan Timestamp:** 2025-12-19 11:30:08
+
+## Filesystem Snapshot
+
+| Metric | Count |
+|--------|-------|
+| Total Files (all types) | 106 |
+| Total Directories | 16 |
+| Python Files (*.py) | 95 |
+| `__pycache__/` directories | 14 |
+| `*.pyc` files | 0 |
+| Python files scanned for content | 95 |
+
+### Scan Coverage
+
+**Ignored directories (content scanning skipped):** .cache, .env, .git, .hg, .idea, .mypy_cache, .next, .pytest_cache, .ruff_cache, .svn, .venv, .vscode, build, dist, env...
+
+Note: Filesystem counts include all files/directories. Content scanning skips ignored directories and `__pycache__/`.
 
 ## Logging Usage Summary
 
@@ -13,16 +27,24 @@
 | Metric | Count |
 |--------|-------|
 | Imports | 20 |
-| `getLogger()` calls | 16 |
-| Total method calls | 1029 |
+| `getLogger()` calls | 14 |
+| Total method calls | 331 |
 
 ### structlog
 
 | Metric | Count |
 |--------|-------|
 | Imports | 1 |
-| `get_logger()` calls | 2 |
-| Total method calls | 17 |
+| `get_logger()` calls | 1 |
+| Total method calls | 1 |
+
+### Generic Logger Calls
+
+| Metric | Count |
+|--------|-------|
+| Total method calls | 699 |
+
+*Note: Logger calls where the logger variable source could not be determined.*
 
 ### Non-Logging Output
 
@@ -30,19 +52,22 @@
 |------|-------|
 | `print()` calls | 549 |
 
-### Framework Logger Usage
+### Framework String Mentions / Imports
 
 | Framework | Count |
 |-----------|-------|
-| gunicorn | 5 |
-| uvicorn | 15 |
+*Note: String mentions or imports, not necessarily logger usage.*
+
+| fastapi | 5 |
+| gunicorn | 1 |
+| uvicorn | 1 |
 
 ### Top 10 Files by Logging Calls
 
 | File | Calls |
 |------|-------|
 | `orchestrator.py` | 238 |
-| `api.py` | 222 |
+| `api.py` | 223 |
 | `ingest.py` | 176 |
 | `utils\simple_delete.py` | 51 |
 | `routes\admin_routes.py` | 37 |
@@ -50,7 +75,7 @@
 | `scripts\migrate_local_pdfs_to_gcs.py` | 35 |
 | `utils\gcs_client.py` | 34 |
 | `utils\single_file_ingestion.py` | 25 |
-| `config\env.py` | 20 |
+| `rag\startup_downloader.py` | 19 |
 
 ### Top 10 Files by Print Calls
 
@@ -71,10 +96,10 @@
 
 | Level | Count |
 |-------|-------|
-| DEBUG | 85 |
-| INFO | 473 |
-| WARNING | 297 |
-| ERROR | 172 |
+| DEBUG | 84 |
+| INFO | 464 |
+| WARNING | 293 |
+| ERROR | 171 |
 | CRITICAL | 1 |
 | EXCEPTION | 18 |
 
@@ -90,16 +115,9 @@
 | `query.py` | 19 | basicConfig |
 | `scripts\migrate_local_pdfs_to_gcs.py` | 26 | basicConfig |
 
-**JSON Formatting Detected:** No
+**JSON Formatting Detected:** Yes
 
 ## Repo Health Snapshot
-
-### Bytecode Files (Read-Only Count)
-
-| Type | Count |
-|------|-------|
-| `__pycache__/` directories | 0 |
-| `*.pyc` files | 0 |
 
 ### TODO/FIXME Comments
 
@@ -117,15 +135,15 @@
 
 | File | Lines of Code |
 |------|---------------|
-| `api.py` | 5633 |
+| `api.py` | 5694 |
 | `orchestrator.py` | 3612 |
 | `ingest.py` | 3390 |
 | `routes\admin_routes.py` | 1795 |
 | `utils\gcs_client.py` | 644 |
-| `utils\database_manager.py` | 545 |
+| `utils\database_manager.py` | 558 |
 | `utils\document_metadata.py` | 538 |
 | `utils\simple_delete.py` | 497 |
-| `rag_pipeline.py` | 412 |
+| `rag_pipeline.py` | 455 |
 | `utils\db.py` | 369 |
 
-**Total Python LOC:** 26580
+**Total Python LOC:** 27020

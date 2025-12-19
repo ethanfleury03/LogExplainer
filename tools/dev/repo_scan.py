@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-READ-ONLY repository scan tool for logging usage and code metrics.
+READ-ONLY logging audit tool for Python repositories.
 
-Scans a repository for logging patterns, code health indicators, and generates
-human-readable Markdown reports or JSON for automation.
+Scans a repository for logging patterns, configuration points, and generates
+actionable findings in human-readable Markdown reports or JSON for automation.
+
+Features:
+- Detects stdlib logging, structlog, and generic logger usage
+- Identifies logging configuration points (basicConfig, dictConfig, fileConfig, structlog.configure)
+- Tracks print() usage and identifies files mixing print() with logging
+- Detects JSON logging configuration
+- Provides actionable findings for logging improvements
 
 Guarantee:
 - This script only READS files.
@@ -185,6 +192,12 @@ class LoggingASTVisitor(ast.NodeVisitor):
                     node.func.value.value.id == "logging" and
                     node.func.value.attr == "config"):
                     self.config_calls.append((node.lineno, "dictConfig"))
+            elif node.func.attr == "fileConfig":
+                if (isinstance(node.func.value, ast.Attribute) and
+                    isinstance(node.func.value.value, ast.Name) and
+                    node.func.value.value.id == "logging" and
+                    node.func.value.attr == "config"):
+                    self.config_calls.append((node.lineno, "fileConfig"))
             elif node.func.attr == "configure":
                 if (isinstance(node.func.value, ast.Name) and
                     node.func.value.id == "structlog"):
@@ -228,30 +241,29 @@ class RepoScanner:
     def __init__(self, root: str, ignore_dirs: Optional[set] = None):
         self.root = Path(root).resolve()
         self.ignore_dirs = ignore_dirs or DEFAULT_IGNORE_DIRS
-        self.stats = {
-            "total_files": 0,  # All file types
-            "total_dirs": 0,
-            "python_files": 0,  # *.py files
-            "pycache_dirs": 0,
-            "pyc_files": 0,
-            "python_files_scanned": 0,  # Python files actually scanned for content
-            "total_loc": 0,
+        # Scan coverage tracking
+        self.scan_coverage = {
+            "python_files_discovered": 0,
+            "python_files_scanned": 0,
+            "python_files_skipped": {
+                "ignored_path": [],
+                "decode_error": [],
+                "read_error": []
+            }
         }
         self.logging_stats = {
             "stdlib_logging": {"imports": 0, "get_logger": 0, "calls": defaultdict(int)},
             "structlog": {"imports": 0, "get_logger": 0, "calls": defaultdict(int)},
             "loguru": {"imports": 0, "get_logger": 0, "calls": defaultdict(int)},
-            "generic_logging": {"calls": defaultdict(int)},  # New category
+            "generic_logging": {"calls": defaultdict(int)},
             "print_calls": 0,
-            "framework_mentions": defaultdict(int),  # Renamed from framework_loggers
+            "framework_mentions": defaultdict(int),
         }
         self.file_logging_counts = defaultdict(int)
         self.file_print_counts = defaultdict(int)
+        self.file_has_both_print_and_logger = []  # Files with both print() and logger calls
         self.level_counts = Counter()
         self.logging_configs = []
-        self.todo_fixme = {"total": 0, "by_file": defaultdict(int)}
-        self.test_files = []
-        self.largest_files = []
         self.scan_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         
     def should_ignore_for_content_scan(self, path: Path) -> bool:
@@ -260,17 +272,6 @@ class RepoScanner:
         for part in parts:
             if part in self.ignore_dirs:
                 return True
-        return False
-    
-    def is_test_file(self, filepath: Path) -> bool:
-        """Determine if a file is a test file."""
-        filename = filepath.name
-        # Check if in tests directory
-        if "tests" in filepath.parts:
-            return True
-        # Check filename patterns
-        if filename.startswith("test_") or filename.endswith("_test.py"):
-            return True
         return False
     
     def analyze_python_file(self, filepath: Path, content: str) -> Dict[str, Any]:
@@ -283,7 +284,6 @@ class RepoScanner:
             # Skip files with syntax errors
             return {
                 "path": rel_path,
-                "loc": 0,
                 "logging_calls": 0,
                 "print_calls": 0,
                 "error": "syntax_error"
@@ -292,10 +292,6 @@ class RepoScanner:
         visitor = LoggingASTVisitor(content)
         visitor.visit(tree)
         visitor.check_json_formatting()
-        
-        # Count LOC (non-empty lines)
-        lines = [l for l in content.splitlines() if l.strip()]
-        loc = len(lines)
         
         # Aggregate counts
         total_logging_calls = (
@@ -352,15 +348,8 @@ class RepoScanner:
         if "fastapi" in content_lower and "logger" in content_lower:
             self.logging_stats["framework_mentions"]["fastapi"] += 1
         
-        # TODO/FIXME comments
-        for line_num, line in enumerate(content.splitlines(), 1):
-            if re.search(r'\bTODO\b|\bFIXME\b', line, re.IGNORECASE):
-                self.todo_fixme["total"] += 1
-                self.todo_fixme["by_file"][rel_path] += 1
-        
         return {
             "path": rel_path,
-            "loc": loc,
             "logging_calls": total_logging_calls,
             "print_calls": visitor.print_calls
         }
@@ -374,76 +363,75 @@ class RepoScanner:
         for root_dir, dirs, files in os.walk(self.root):
             root_path = Path(root_dir)
             
-            # Count ALL directories (before any filtering)
-            self.stats["total_dirs"] += 1
-            
-            # Count ALL files (before any filtering) - includes files in ignored dirs
-            self.stats["total_files"] += len(files)
-            
-            # Count file types (before filtering)
-            for filename in files:
-                if filename.endswith(".pyc"):
-                    self.stats["pyc_files"] += 1
-                elif filename.endswith(".py"):
-                    self.stats["python_files"] += 1
-            
-            # Count __pycache__ directories (before filtering)
+            # Skip __pycache__ directories entirely
             if "__pycache__" in dirs:
-                self.stats["pycache_dirs"] += 1
-                # Remove from dirs to avoid descending, but we've already counted it
                 dirs[:] = [d for d in dirs if d != "__pycache__"]
             
-            # Filter out ignored directories for content scanning only
-            # (We've already counted files/dirs above, so this only affects what we scan)
+            # Filter out ignored directories for content scanning
             dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not self.should_ignore_for_content_scan(root_path / d)]
             
-            # Scan Python files for content (only if not in ignored directory)
+            # Scan Python files for content
             for filename in files:
                 if filename.endswith(".py"):
                     filepath = root_path / filename
+                    rel_path = str(filepath.relative_to(self.root))
                     
-                    # Skip if in ignored directory (for content scanning only)
+                    # Count all discovered Python files
+                    self.scan_coverage["python_files_discovered"] += 1
+                    
+                    # Skip if in ignored directory
                     if self.should_ignore_for_content_scan(filepath):
+                        self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
                         continue
-                    
-                    # Check if test file
-                    if self.is_test_file(filepath):
-                        rel_path = str(filepath.relative_to(self.root))
-                        self.test_files.append(rel_path)
                     
                     # Read and analyze
                     try:
                         content = filepath.read_text(encoding="utf-8", errors="replace")
-                    except Exception:
+                    except UnicodeDecodeError as e:
+                        self.scan_coverage["python_files_skipped"]["decode_error"].append(rel_path)
+                        continue
+                    except Exception as e:
+                        self.scan_coverage["python_files_skipped"]["read_error"].append(rel_path)
                         continue
                     
-                    self.stats["python_files_scanned"] += 1
+                    self.scan_coverage["python_files_scanned"] += 1
                     
                     # Analyze with AST
                     result = self.analyze_python_file(filepath, content)
                     
-                    # Track LOC and largest files
-                    if result["loc"] > 0:
-                        self.stats["total_loc"] += result["loc"]
-                        self.largest_files.append((result["path"], result["loc"]))
+                    # Track files with both print() and logger calls
+                    if result["print_calls"] > 0 and result["logging_calls"] > 0:
+                        self.file_has_both_print_and_logger.append({
+                            "file": rel_path,
+                            "print_calls": result["print_calls"],
+                            "logging_calls": result["logging_calls"]
+                        })
     
     def get_report_data(self) -> Dict[str, Any]:
         """Get structured report data."""
-        # Sort largest files
-        self.largest_files.sort(key=lambda x: x[1], reverse=True)
-        
         # Get top files
         top_logging_files = sorted(self.file_logging_counts.items(), key=lambda x: x[1], reverse=True)[:10]
         top_print_files = sorted(self.file_print_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-        top_todo_files = sorted(self.todo_fixme["by_file"].items(), key=lambda x: x[1], reverse=True)[:10]
         
         # Check for JSON formatting in configs
-        has_json_formatting = any(
-            cfg.get("has_json_formatting", False) or
-            "json" in str(cfg).lower() or
-            any(indicator in str(cfg).lower() for indicator in ["JSONFormatter", "JSONRenderer", "pythonjsonlogger"])
-            for cfg in self.logging_configs
-        )
+        json_configs = [cfg for cfg in self.logging_configs if cfg.get("has_json_formatting", False)]
+        has_json_formatting = len(json_configs) > 0
+        
+        # Actionable findings
+        basic_config_count = sum(1 for cfg in self.logging_configs if cfg["config_type"] == "basicConfig")
+        multiple_basic_config = basic_config_count > 1
+        
+        # High print() counts outside scripts/ directory (threshold: 10+)
+        high_print_files = []
+        for file_path, count in self.file_print_counts.items():
+            if count >= 10 and "scripts" not in file_path.lower():
+                high_print_files.append({"file": file_path, "count": count})
+        high_print_files.sort(key=lambda x: x["count"], reverse=True)
+        
+        # Files with both print() and logger calls
+        files_with_both = sorted(self.file_has_both_print_and_logger, 
+                                key=lambda x: x["print_calls"] + x["logging_calls"], 
+                                reverse=True)
         
         return {
             "meta": {
@@ -451,16 +439,19 @@ class RepoScanner:
                 "scan_timestamp": self.scan_timestamp,
                 "exclusions": sorted(self.ignore_dirs)
             },
-            "filesystem": {
-                "total_files": self.stats["total_files"],
-                "total_dirs": self.stats["total_dirs"],
-                "python_files": self.stats["python_files"],
-                "pycache_dirs": self.stats["pycache_dirs"],
-                "pyc_files": self.stats["pyc_files"],
-                "python_files_scanned": self.stats["python_files_scanned"],
-            },
-            "scan": {
-                "total_loc": self.stats["total_loc"]
+            "scan_coverage": {
+                "python_files_discovered": self.scan_coverage["python_files_discovered"],
+                "python_files_scanned": self.scan_coverage["python_files_scanned"],
+                "python_files_skipped": {
+                    "ignored_path": len(self.scan_coverage["python_files_skipped"]["ignored_path"]),
+                    "decode_error": len(self.scan_coverage["python_files_skipped"]["decode_error"]),
+                    "read_error": len(self.scan_coverage["python_files_skipped"]["read_error"])
+                },
+                "skipped_files_detail": {
+                    "ignored_path": self.scan_coverage["python_files_skipped"]["ignored_path"][:20],  # Limit for report
+                    "decode_error": self.scan_coverage["python_files_skipped"]["decode_error"][:20],
+                    "read_error": self.scan_coverage["python_files_skipped"]["read_error"][:20]
+                }
             },
             "logging_usage": {
                 "stdlib_logging": {
@@ -489,14 +480,16 @@ class RepoScanner:
             "log_levels": dict(self.level_counts),
             "logging_config": {
                 "config_locations": self.logging_configs,
-                "has_json_formatting": has_json_formatting
+                "has_json_formatting": has_json_formatting,
+                "json_config_locations": json_configs
             },
-            "repo_health": {
-                "todo_fixme_total": self.todo_fixme["total"],
-                "top_todo_files": [{"file": f, "count": c} for f, c in top_todo_files],
-                "test_files_count": len(self.test_files),
-                "largest_files": [{"file": f, "loc": l} for f, l in self.largest_files[:10]],
-                "total_python_loc": self.stats["total_loc"]
+            "actionable_findings": {
+                "multiple_basic_config": multiple_basic_config,
+                "basic_config_count": basic_config_count,
+                "high_print_counts_outside_scripts": high_print_files[:20],
+                "files_with_both_print_and_logger": files_with_both[:20],
+                "json_logging_enabled": has_json_formatting,
+                "json_logging_locations": json_configs
             }
         }
     
@@ -505,33 +498,56 @@ class RepoScanner:
         lines = []
         
         # Header
-        lines.append("# Repository Scan Report")
+        lines.append("# Logging Audit Report")
         lines.append("")
         lines.append(f"**Repo Path:** `{data['meta']['repo_path']}`")
         lines.append(f"**Scan Timestamp:** {data['meta']['scan_timestamp']}")
         lines.append("")
         
-        # Filesystem Snapshot
-        fs = data["filesystem"]
-        lines.append("## Filesystem Snapshot")
+        # Scan Coverage
+        coverage = data["scan_coverage"]
+        lines.append("## Scan Coverage")
         lines.append("")
         lines.append("| Metric | Count |")
         lines.append("|--------|-------|")
-        lines.append(f"| Total Files (all types) | {fs['total_files']} |")
-        lines.append(f"| Total Directories | {fs['total_dirs']} |")
-        lines.append(f"| Python Files (*.py) | {fs['python_files']} |")
-        lines.append(f"| `__pycache__/` directories | {fs['pycache_dirs']} |")
-        lines.append(f"| `*.pyc` files | {fs['pyc_files']} |")
-        lines.append(f"| Python files scanned for content | {fs['python_files_scanned']} |")
+        lines.append(f"| Python files discovered | {coverage['python_files_discovered']} |")
+        lines.append(f"| Python files successfully scanned | {coverage['python_files_scanned']} |")
+        lines.append(f"| Python files skipped (ignored path) | {coverage['python_files_skipped']['ignored_path']} |")
+        lines.append(f"| Python files skipped (decode error) | {coverage['python_files_skipped']['decode_error']} |")
+        lines.append(f"| Python files skipped (read error) | {coverage['python_files_skipped']['read_error']} |")
         lines.append("")
         
-        # Scan Coverage
-        lines.append("### Scan Coverage")
-        lines.append("")
-        lines.append(f"**Ignored directories (content scanning skipped):** {', '.join(data['meta']['exclusions'][:15])}{'...' if len(data['meta']['exclusions']) > 15 else ''}")
-        lines.append("")
-        lines.append("Note: Filesystem counts include all files/directories. Content scanning skips ignored directories and `__pycache__/`.")
-        lines.append("")
+        # Show ignored directories
+        exclusions = data['meta']['exclusions']
+        if exclusions:
+            lines.append(f"**Ignored directories:** {', '.join(exclusions[:20])}{'...' if len(exclusions) > 20 else ''}")
+            lines.append("")
+        
+        # Show sample skipped files if any
+        skipped_detail = coverage["skipped_files_detail"]
+        if skipped_detail["ignored_path"]:
+            lines.append("**Sample skipped files (ignored path):**")
+            for f in skipped_detail["ignored_path"][:5]:
+                lines.append(f"- `{f}`")
+            if len(skipped_detail["ignored_path"]) > 5:
+                lines.append(f"- ... and {len(skipped_detail['ignored_path']) - 5} more")
+            lines.append("")
+        
+        if skipped_detail["decode_error"]:
+            lines.append("**Sample skipped files (decode error):**")
+            for f in skipped_detail["decode_error"][:5]:
+                lines.append(f"- `{f}`")
+            if len(skipped_detail["decode_error"]) > 5:
+                lines.append(f"- ... and {len(skipped_detail['decode_error']) - 5} more")
+            lines.append("")
+        
+        if skipped_detail["read_error"]:
+            lines.append("**Sample skipped files (read error):**")
+            for f in skipped_detail["read_error"][:5]:
+                lines.append(f"- `{f}`")
+            if len(skipped_detail["read_error"]) > 5:
+                lines.append(f"- ... and {len(skipped_detail['read_error']) - 5} more")
+            lines.append("")
         
         # Logging Usage Summary
         lines.append("## Logging Usage Summary")
@@ -642,45 +658,76 @@ class RepoScanner:
             lines.append("")
             lines.append("| File | Line | Type |")
             lines.append("|------|------|------|")
-            for cfg in data["logging_config"]["config_locations"][:10]:
-                lines.append(f"| `{cfg['file']}` | {cfg['line']} | {cfg['config_type']} |")
+            for cfg in data["logging_config"]["config_locations"]:
+                json_marker = " (JSON)" if cfg.get("has_json_formatting") else ""
+                lines.append(f"| `{cfg['file']}` | {cfg['line']} | {cfg['config_type']}{json_marker} |")
             lines.append("")
-            lines.append(f"**JSON Formatting Detected:** {'Yes' if data['logging_config']['has_json_formatting'] else 'No'}")
+            
+            # Framework config references
+            if data["logging_usage"]["framework_mentions"]:
+                lines.append("### Framework Config References")
+                lines.append("")
+                lines.append("| Framework | File Mentions |")
+                lines.append("|-----------|---------------|")
+                for fw, count in sorted(data["logging_usage"]["framework_mentions"].items()):
+                    lines.append(f"| {fw} | {count} |")
+                lines.append("")
         else:
             lines.append("No explicit logging configuration found.")
         lines.append("")
         
-        # Repo Health Snapshot
-        lines.append("## Repo Health Snapshot")
+        # Actionable Findings
+        lines.append("## Actionable Findings")
         lines.append("")
+        findings = data["actionable_findings"]
         
-        health = data["repo_health"]
-        lines.append("### TODO/FIXME Comments")
-        lines.append("")
-        lines.append(f"**Total:** {health['todo_fixme_total']}")
-        if health["top_todo_files"]:
+        # Multiple basicConfig
+        if findings["multiple_basic_config"]:
+            lines.append(f"⚠️ **Multiple `basicConfig()` calls detected:** {findings['basic_config_count']}")
             lines.append("")
-            lines.append("| File | Count |")
-            lines.append("|------|-------|")
-            for item in health["top_todo_files"]:
+            lines.append("Having multiple `basicConfig()` calls can cause configuration conflicts. Consider consolidating to a single configuration point.")
+            lines.append("")
+            basic_configs = [cfg for cfg in data["logging_config"]["config_locations"] if cfg["config_type"] == "basicConfig"]
+            for cfg in basic_configs:
+                lines.append(f"- `{cfg['file']}:{cfg['line']}`")
+            lines.append("")
+        
+        # High print() counts outside scripts/
+        if findings["high_print_counts_outside_scripts"]:
+            lines.append("⚠️ **High `print()` usage outside scripts/ directories:**")
+            lines.append("")
+            lines.append("| File | Print Calls |")
+            lines.append("|------|-------------|")
+            for item in findings["high_print_counts_outside_scripts"]:
                 lines.append(f"| `{item['file']}` | {item['count']} |")
-        lines.append("")
+            lines.append("")
+            lines.append("Consider replacing `print()` calls with proper logging in production code.")
+            lines.append("")
         
-        lines.append("### Test Files")
-        lines.append("")
-        lines.append(f"**Total test files discovered:** {health['test_files_count']}")
-        lines.append("")
+        # Files with both print() and logger calls
+        if findings["files_with_both_print_and_logger"]:
+            lines.append("⚠️ **Files using both `print()` and logger calls:**")
+            lines.append("")
+            lines.append("| File | Print Calls | Logger Calls |")
+            lines.append("|------|-------------|-------------|")
+            for item in findings["files_with_both_print_and_logger"]:
+                lines.append(f"| `{item['file']}` | {item['print_calls']} | {item['logging_calls']} |")
+            lines.append("")
+            lines.append("Consider standardizing on logging for consistent output handling.")
+            lines.append("")
         
-        lines.append("### Largest Python Files (by LOC)")
-        lines.append("")
-        lines.append("| File | Lines of Code |")
-        lines.append("|------|---------------|")
-        for item in health["largest_files"]:
-            lines.append(f"| `{item['file']}` | {item['loc']} |")
-        lines.append("")
-        
-        lines.append(f"**Total Python LOC:** {health['total_python_loc']}")
-        lines.append("")
+        # JSON logging status
+        if findings["json_logging_enabled"]:
+            lines.append("✅ **JSON logging is enabled:**")
+            lines.append("")
+            for cfg in findings["json_logging_locations"]:
+                lines.append(f"- `{cfg['file']}:{cfg['line']}` ({cfg['config_type']})")
+            lines.append("")
+        else:
+            lines.append("ℹ️ **JSON logging not detected**")
+            lines.append("")
+            lines.append("Consider enabling JSON formatting for structured logging, especially in production environments.")
+            lines.append("")
         
         return "\n".join(lines)
 
@@ -688,7 +735,7 @@ class RepoScanner:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Scan repository for logging usage and code metrics (STRICTLY READ-ONLY)",
+        description="Logging audit tool for Python repositories (STRICTLY READ-ONLY)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
