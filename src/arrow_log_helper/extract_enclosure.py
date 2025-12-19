@@ -83,6 +83,11 @@ def _safe_read_lines(path):
     return lines
 
 
+# Regex patterns matching the exact requirements:
+# ^\s*(async\s+def|def|class)\s+NAME\s*\(
+# or ^\s*class\s+NAME\s*(\(|:)\s*
+_RE_DEF_HEADER = re.compile(r"^\s*(async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_RE_CLASS_HEADER = re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\(|:)\s*")
 _RE_DEF_NAME = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)")
 _RE_CLASS_NAME = re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)")
 _RE_ASYNC_DEF = re.compile(r"^\s*async\s+def\s+")
@@ -146,11 +151,12 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
         i = n - 1
 
     def is_header_line(line):
-        """Check if line is a def, async def, or class header."""
+        """Check if line is a def, async def, or class header using regex."""
         if line is None:
             return False
-        stripped = line.lstrip()
-        return stripped.startswith("def ") or stripped.startswith("async def ") or stripped.startswith("class ")
+        # Use regex to match exact pattern: ^\s*(async\s+def|def|class)\s+NAME\s*\(
+        # or ^\s*class\s+NAME\s*(\(|:)\s*
+        return bool(_RE_DEF_HEADER.match(line) or _RE_CLASS_HEADER.match(line))
 
     def compute_block_bounds(header_idx):
         """Compute start and end indices for a block starting at header_idx.
@@ -190,9 +196,19 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
             ind = _indent_width(s)
             # Block ends when we hit a line with indentation <= base_indent
             # that is either a new def/class or at module level (ind == 0)
+            # Skip continuation lines (lines that are part of multi-line statements)
             if ind <= base_indent:
-                if is_header_line(s) or ind == 0:
-                    break
+                # Don't break on continuation lines (lines ending with backslash)
+                is_continuation = False
+                if k > 0:
+                    prev_line = lines[k - 1].rstrip()
+                    if prev_line.endswith("\\"):
+                        is_continuation = True
+                
+                if not is_continuation:
+                    # Break on new header or module-level statement (not comments)
+                    if is_header_line(s) or (ind == 0 and not stripped.startswith("#")):
+                        break
             end_idx = k
         return start_idx, end_idx
 
@@ -239,25 +255,26 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
                 return out
             # If not contained, continue searching upward
 
-    # No valid enclosure found - return fallback window
+    # No valid enclosure found - return module-level fallback
     lo = i - int(context_fallback)
     hi = i + int(context_fallback)
     if lo < 0:
         lo = 0
     if hi >= n:
         hi = n - 1
-    out["enclosure_type"] = "window"
+    out["enclosure_type"] = "module"
     out["name"] = None
-    out["start_line"] = lo + 1
-    out["end_line"] = hi + 1
+    out["start_line"] = None
+    out["end_line"] = None
     out["block"] = u"\n".join(lines[lo : hi + 1])
-    out["notes"] = "No enclosing def/class found; returning context window."
+    out["notes"] = "No enclosing def/class found; returning module-level context window."
     return out
 
 
 def extract_signature_only(enclosure_dict):
     """
-    Extract only the signature line for def/class enclosures.
+    Extract signature line(s) for def/class enclosures.
+    Includes decorators if present.
     Returns a string or None.
     """
     enclosure_dict = enclosure_dict or {}
@@ -269,13 +286,38 @@ def extract_signature_only(enclosure_dict):
         lines = []
 
     if enc_type in ("def", "async_def"):
-        for ln in lines:
+        # Find the def line
+        def_line = None
+        def_idx = None
+        for idx, ln in enumerate(lines):
             if ln is None:
                 continue
             stripped = ln.lstrip()
             if stripped.startswith("def ") or stripped.startswith("async def "):
-                return ln.strip()
-        return None
+                def_line = ln.strip()
+                def_idx = idx
+                break
+        
+        if def_line is None:
+            return None
+        
+        # Check for decorators above the def
+        decorators = []
+        for idx in range(def_idx - 1, -1, -1):
+            ln = lines[idx] if idx < len(lines) else None
+            if ln is None:
+                break
+            stripped = ln.lstrip()
+            if stripped.startswith("@"):
+                decorators.insert(0, ln.strip())
+            else:
+                break
+        
+        # Return decorators + def line
+        if decorators:
+            return "\n".join(decorators + [def_line])
+        return def_line
+    
     if enc_type == "class":
         for ln in lines:
             if ln is None:

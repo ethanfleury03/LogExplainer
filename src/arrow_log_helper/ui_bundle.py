@@ -75,6 +75,8 @@ def _compute_enclosure_display_name(enclosure_type, name, signature):
         return "%s%s(...)" % (prefix, name,)
     if enclosure_type == "class" and name:
         return "class %s" % (name,)
+    if enclosure_type == "module":
+        return "<module>"
     if enclosure_type == "window":
         return "<context window>"
     return "<none>"

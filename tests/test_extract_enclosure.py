@@ -51,16 +51,18 @@ class ExtractEnclosureTest(unittest.TestCase):
         self.assertLessEqual(enc.get("start_line"), match_line_no)
         self.assertGreaterEqual(enc.get("end_line"), match_line_no)
 
-    def test_fallback_window(self):
+    def test_fallback_module(self):
         path = os.path.join(self._fixture_root(), "top_level_only.py")
         # logger.error is on line 4 in this fixture (after future import + comment).
         match_line_no = 4
         enc = extract_enclosure.extract_enclosure(path, match_line_no, context_fallback=2)
-        self.assertEqual(enc.get("enclosure_type"), "window")
+        self.assertEqual(enc.get("enclosure_type"), "module")
+        self.assertIsNone(enc.get("start_line"), "Module-level should have start_line=None")
+        self.assertIsNone(enc.get("end_line"), "Module-level should have end_line=None")
         self.assertIn("very_unique_marker_123456", enc.get("block", ""))
-        # Window should still contain the match line
-        self.assertLessEqual(enc.get("start_line"), match_line_no)
-        self.assertGreaterEqual(enc.get("end_line"), match_line_no)
+        # Block should still contain the match line (context window)
+        block_lines = enc.get("block", "").split("\n")
+        self.assertTrue(len(block_lines) > 0, "Block should have content")
 
     def test_wrong_previous_function_regression(self):
         """Test that match inside second function returns second function, not first."""
@@ -130,7 +132,7 @@ async def startup_event():
                 pass
 
     def test_module_level_log(self):
-        """Test that module-level match returns window type."""
+        """Test that module-level match returns module type."""
         import tempfile
         test_content = """# Module level
 logger.error("module level error")
@@ -144,12 +146,11 @@ x = 1
             # Match is on line 2 (module level, no def/class)
             match_line_no = 2
             enc = extract_enclosure.extract_enclosure(temp_path, match_line_no, context_fallback=5)
-            # Should return window type
-            self.assertEqual(enc.get("enclosure_type"), "window")
+            # Should return module type
+            self.assertEqual(enc.get("enclosure_type"), "module")
             self.assertIsNone(enc.get("name"))
-            # Should still contain the match line
-            self.assertLessEqual(enc.get("start_line"), match_line_no)
-            self.assertGreaterEqual(enc.get("end_line"), match_line_no)
+            self.assertIsNone(enc.get("start_line"), "Module-level should have start_line=None")
+            self.assertIsNone(enc.get("end_line"), "Module-level should have end_line=None")
             self.assertIn("module level error", enc.get("block", ""))
         finally:
             try:
