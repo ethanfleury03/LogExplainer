@@ -372,6 +372,17 @@ class ArrowLogHelperApp(object):
             self.btn_analyze.config(state="normal")
         else:
             self.btn_analyze.config(state="disabled")
+    
+    def set_log_text(self, text):
+        """Set the log entry text and update button state."""
+        if hasattr(self, "log_entry_var") and self.log_entry_var is not None:
+            self.log_entry_var.set(_safe_text(text))
+        elif hasattr(self, "log_entry") and self.log_entry is not None:
+            self.log_entry.delete(0, tk.END)
+            self.log_entry.insert(0, _safe_text(text))
+        
+        # Update button enabled state
+        self._on_log_entry_change()
 
     def _resolve_base(self, b):
         b = (b or "").strip()
@@ -1147,14 +1158,38 @@ Usage:
             messagebox.showerror("Copy failed", "Failed to copy JSON: %s" % (_safe_text(e),))
 
 
+def run_app(prefill_log=None):
+    """
+    Launch the GUI application with optional log prefill.
+    
+    Args:
+        prefill_log: Optional string to prefill the log entry field.
+    """
+    root = tk.Tk()
+    app = ArrowLogHelperApp(root)
+    root.minsize(1100, 700)
+    
+    if prefill_log:
+        app.set_log_text(prefill_log)
+    
+    root.mainloop()
+    return 0
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
-    root = tk.Tk()
-    ArrowLogHelperApp(root)
-    root.minsize(1100, 700)
-    root.mainloop()
-    return 0
+    
+    # Check for prefill log from environment (set by RUN_ME.py --test)
+    prefill_log = os.environ.get("ARROW_LOG_HELPER_PREFILL_LOG")
+    if prefill_log:
+        # Clear it so it doesn't persist
+        try:
+            del os.environ["ARROW_LOG_HELPER_PREFILL_LOG"]
+        except Exception:
+            pass
+    
+    return run_app(prefill_log=prefill_log)
 
 
 if __name__ == "__main__":

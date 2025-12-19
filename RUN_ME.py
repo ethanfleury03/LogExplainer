@@ -1,10 +1,13 @@
 from __future__ import absolute_import, print_function
 
+import argparse
 import os
 import sys
 
 # Prevent pycache creation on target machine
 sys.dont_write_bytecode = True
+
+TEST_LOG_LINE = "2025-12-19T05:22:06.895453+11:00 RS20300529 Kareela0: <E> [#4] PeriodicIdle: waitComplete for localhost:9210:Dyn-ultron:VALVE"
 
 
 def _repo_root():
@@ -31,6 +34,18 @@ def _print_startup(repo_root, src_dir):
         pass
 
 
+def _parse_args(argv):
+    """Parse command line arguments."""
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument(
+        "--test",
+        action="store_true",
+        default=False,
+        help="Launch GUI with a pre-filled demo log line (no auto-run).",
+    )
+    return ap.parse_args(argv)
+
+
 def _print_help():
     msg = "\n".join(
         [
@@ -38,6 +53,7 @@ def _print_help():
             "",
             "Usage:",
             "  python RUN_ME.py",
+            "  python RUN_ME.py --test  # Launch with pre-filled demo log",
             "",
             "Dev / CI:",
             "  ARROW_LOG_HELPER_NO_GUI=1 python RUN_ME.py",
@@ -59,6 +75,13 @@ def main(argv=None):
         _print_help()
         return 0
 
+    # Parse arguments
+    try:
+        args = _parse_args(argv)
+    except SystemExit:
+        # argparse already printed help/error
+        return 1
+
     repo_root = _repo_root()
     src_dir = _ensure_src_on_syspath(repo_root)
     _print_startup(repo_root, src_dir)
@@ -68,8 +91,15 @@ def main(argv=None):
         sys.stdout.write("NO_GUI mode\n")
         return 0
 
+    # Determine prefill log
+    prefill_log = TEST_LOG_LINE if args.test else None
+
     # Launch via the package entrypoint so safety bootstrap + write firewall is installed.
     from arrow_log_helper import __main__ as alh_main
+
+    # Pass prefill_log through environment variable (simple approach)
+    if prefill_log:
+        os.environ["ARROW_LOG_HELPER_PREFILL_LOG"] = prefill_log
 
     return int(alh_main.main([]) or 0)
 
