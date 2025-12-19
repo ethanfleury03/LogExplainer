@@ -1,24 +1,19 @@
-# Repository Scan Report
+# Logging Audit Report
 
 **Repo Path:** `C:\Users\ethan\ArrowSystems\backend`
-**Scan Timestamp:** 2025-12-19 11:30:08
+**Scan Timestamp:** 2025-12-19 11:49:54
 
-## Filesystem Snapshot
+## Scan Coverage
 
 | Metric | Count |
 |--------|-------|
-| Total Files (all types) | 106 |
-| Total Directories | 16 |
-| Python Files (*.py) | 95 |
-| `__pycache__/` directories | 14 |
-| `*.pyc` files | 0 |
-| Python files scanned for content | 95 |
+| Python files discovered | 95 |
+| Python files successfully scanned | 95 |
+| Python files skipped (ignored path) | 0 |
+| Python files skipped (decode error) | 0 |
+| Python files skipped (read error) | 0 |
 
-### Scan Coverage
-
-**Ignored directories (content scanning skipped):** .cache, .env, .git, .hg, .idea, .mypy_cache, .next, .pytest_cache, .ruff_cache, .svn, .venv, .vscode, build, dist, env...
-
-Note: Filesystem counts include all files/directories. Content scanning skips ignored directories and `__pycache__/`.
+**Ignored directories:** .cache, .env, .git, .hg, .idea, .mypy_cache, .next, .pytest_cache, .ruff_cache, .svn, .venv, .vscode, build, dist, env, latest_model, logs, models, node_modules, out...
 
 ## Logging Usage Summary
 
@@ -28,7 +23,7 @@ Note: Filesystem counts include all files/directories. Content scanning skips ig
 |--------|-------|
 | Imports | 20 |
 | `getLogger()` calls | 14 |
-| Total method calls | 331 |
+| Total method calls | 330 |
 
 ### structlog
 
@@ -96,7 +91,7 @@ Note: Filesystem counts include all files/directories. Content scanning skips ig
 
 | Level | Count |
 |-------|-------|
-| DEBUG | 84 |
+| DEBUG | 83 |
 | INFO | 464 |
 | WARNING | 293 |
 | ERROR | 171 |
@@ -110,40 +105,62 @@ Note: Filesystem counts include all files/directories. Content scanning skips ig
 | File | Line | Type |
 |------|------|------|
 | `ingest.py` | 73 | basicConfig |
-| `logging_config.py` | 29 | basicConfig |
-| `logging_config.py` | 63 | structlog.configure |
+| `logging_config.py` | 29 | basicConfig (JSON) |
+| `logging_config.py` | 63 | structlog.configure (JSON) |
 | `query.py` | 19 | basicConfig |
 | `scripts\migrate_local_pdfs_to_gcs.py` | 26 | basicConfig |
 
-**JSON Formatting Detected:** Yes
+### Framework Config References
 
-## Repo Health Snapshot
+| Framework | File Mentions |
+|-----------|---------------|
+| fastapi | 5 |
+| gunicorn | 1 |
+| uvicorn | 1 |
 
-### TODO/FIXME Comments
 
-**Total:** 2
+## Actionable Findings
 
-| File | Count |
-|------|-------|
-| `api.py` | 2 |
+⚠️ **Multiple `basicConfig()` calls detected:** 4
 
-### Test Files
+Having multiple `basicConfig()` calls can cause configuration conflicts. Consider consolidating to a single configuration point.
 
-**Total test files discovered:** 19
+- `ingest.py:73`
+- `logging_config.py:29`
+- `query.py:19`
+- `scripts\migrate_local_pdfs_to_gcs.py:26`
 
-### Largest Python Files (by LOC)
+⚠️ **High `print()` usage outside scripts/ directories:**
 
-| File | Lines of Code |
-|------|---------------|
-| `api.py` | 5694 |
-| `orchestrator.py` | 3612 |
-| `ingest.py` | 3390 |
-| `routes\admin_routes.py` | 1795 |
-| `utils\gcs_client.py` | 644 |
-| `utils\database_manager.py` | 558 |
-| `utils\document_metadata.py` | 538 |
-| `utils\simple_delete.py` | 497 |
-| `rag_pipeline.py` | 455 |
-| `utils\db.py` | 369 |
+| File | Print Calls |
+|------|-------------|
+| `ingest.py` | 104 |
+| `query.py` | 33 |
+| `utils\reset_index.py` | 31 |
+| `utils\migration_runner.py` | 17 |
+| `api.py` | 16 |
+| `preload_models.py` | 14 |
 
-**Total Python LOC:** 27020
+Consider replacing `print()` calls with proper logging in production code.
+
+⚠️ **Files using both `print()` and logger calls:**
+
+| File | Print Calls | Logger Calls |
+|------|-------------|-------------|
+| `ingest.py` | 104 | 176 |
+| `orchestrator.py` | 3 | 238 |
+| `api.py` | 16 | 223 |
+| `query.py` | 33 | 2 |
+| `utils\migration_runner.py` | 17 | 16 |
+| `scripts\find_orphaned_documents.py` | 27 | 2 |
+| `rag\startup_downloader.py` | 7 | 19 |
+| `rag_pipeline.py` | 6 | 15 |
+| `config\env.py` | 2 | 10 |
+| `utils\audit_log.py` | 2 | 3 |
+
+Consider standardizing on logging for consistent output handling.
+
+✅ **JSON logging is enabled:**
+
+- `logging_config.py:29` (basicConfig)
+- `logging_config.py:63` (structlog.configure)
