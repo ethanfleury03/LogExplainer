@@ -35,8 +35,6 @@ import re
 import sys
 import time
 from collections import defaultdict, Counter
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any, Set
 
 # Prevent bytecode generation
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -58,7 +56,7 @@ DEFAULT_IGNORE_DIRS = {
 class LoggingASTVisitor(ast.NodeVisitor):
     """AST visitor to extract logging patterns from Python code."""
     
-    def __init__(self, file_content: str, file_path: str = ""):
+    def __init__(self, file_content, file_path=""):
         self.file_content = file_content
         self.lines = file_content.splitlines()
         self.file_path = file_path
@@ -337,7 +335,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 elif isinstance(node.func.value, ast.Attribute):
                     # Track attribute access patterns
                     if isinstance(node.func.value.value, ast.Name):
-                        var_name = f"{node.func.value.value.id}.{node.func.value.attr}"
+                        var_name = "{}.{}".format(node.func.value.value.id, node.func.value.attr)
                         self.unknown_logger_vars[var_name] += 1
                 
                 self.generic_calls[level_to_count] += 1
@@ -369,7 +367,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
         
         self.generic_visit(node)
     
-    def _is_config_guarded(self, node: ast.Call) -> bool:
+    def _is_config_guarded(self, node):
         """Check if config call is guarded (inside function or if __name__ == '__main__')."""
         # Walk up the AST to find if we're inside a function/class or if __name__ == "__main__"
         parent = getattr(node, 'parent', None)
@@ -404,7 +402,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
             self.bare_except_blocks.append(node.lineno)
         self.generic_visit(node)
     
-    def _extract_error_template(self, node: ast.Call) -> str:
+    def _extract_error_template(self, node):
         """Extract error message template from a logging call node."""
         if not node.args:
             return "<unknown>"
@@ -446,7 +444,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
         template = re.sub(r'\s+', ' ', template.strip())
         return template
     
-    def _extract_string_parts(self, node: ast.AST, parts: list) -> None:
+    def _extract_string_parts(self, node, parts):
         """Helper to extract string parts from string concatenation."""
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             self._extract_string_parts(node.left, parts)
@@ -496,8 +494,8 @@ class LoggingASTVisitor(ast.NodeVisitor):
 class RepoScanner:
     """Scans repository for logging patterns and code metrics."""
     
-    def __init__(self, root: str, ignore_dirs: Optional[set] = None, include_cache_metrics: bool = False):
-        self.root = Path(root).resolve()
+    def __init__(self, root, ignore_dirs=None, include_cache_metrics=False):
+        self.root = os.path.abspath(os.path.realpath(root))
         self.ignore_dirs = ignore_dirs or DEFAULT_IGNORE_DIRS
         self.include_cache_metrics = include_cache_metrics
         # Scan coverage tracking
@@ -557,20 +555,30 @@ class RepoScanner:
         
         self.scan_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         
-    def should_ignore_for_content_scan(self, path: Path) -> bool:
+    def should_ignore_for_content_scan(self, path):
         """Check if path should be ignored for content scanning (not counting)."""
-        parts = path.parts
+        # Convert to relative path and split
+        try:
+            rel_path = os.path.relpath(path, self.root)
+        except ValueError:
+            # Paths on different drives (Windows)
+            return True
+        parts = rel_path.replace("\\", "/").split("/")
         for part in parts:
             if part in self.ignore_dirs:
                 return True
         return False
     
-    def is_test_file(self, filepath: Path) -> bool:
+    def is_test_file(self, filepath):
         """Check if file is a test file (always exclude from production audit)."""
-        rel_path = str(filepath.relative_to(self.root))
+        try:
+            rel_path = os.path.relpath(filepath, self.root)
+        except ValueError:
+            return False
         rel_path_lower = rel_path.lower()
-        filename = filepath.name.lower()
-        path_parts = [p.lower() for p in filepath.parts]
+        filename = os.path.basename(filepath).lower()
+        # Split path into parts
+        path_parts = [p.lower() for p in rel_path.replace("\\", "/").split("/") if p]
         
         # Check for test directories (exact matches in path parts)
         test_dir_patterns = {"tests", "test", "__tests__", "fixtures", "testdata", "sample_repo"}
@@ -594,16 +602,23 @@ class RepoScanner:
         
         return False
     
-    def is_self_file(self, filepath: Path) -> bool:
+    def is_self_file(self, filepath):
         """Check if file is the scanner itself (always exclude)."""
-        rel_path = str(filepath.relative_to(self.root))
+        try:
+            rel_path = os.path.relpath(filepath, self.root)
+        except ValueError:
+            return False
         normalized = rel_path.replace("\\", "/")
+        filename = os.path.basename(filepath)
         # Exclude the scanner script itself
-        return normalized == "tools/dev/repo_scan.py" or filepath.name == "repo_scan.py"
+        return normalized == "tools/dev/repo_scan.py" or filename == "repo_scan.py" or filename == "temp.py"
     
-    def analyze_python_file(self, filepath: Path, content: str) -> Dict[str, Any]:
+    def analyze_python_file(self, filepath, content):
         """Analyze a Python file using AST. Defensive check: should never be called for excluded files."""
-        rel_path = str(filepath.relative_to(self.root))
+        try:
+            rel_path = os.path.relpath(filepath, self.root)
+        except ValueError:
+            rel_path = filepath
         
         # Defensive check: ensure this file should be analyzed (should never trigger if exclusion works)
         if self.is_self_file(filepath) or self.is_test_file(filepath) or self.should_ignore_for_content_scan(filepath):
@@ -622,7 +637,7 @@ class RepoScanner:
         non_empty_lines = sum(1 for line in content.splitlines() if line.strip())
         
         try:
-            tree = ast.parse(content, filename=str(filepath))
+            tree = ast.parse(content, filename=filepath)
         except (SyntaxError, ValueError) as e:
             # Skip files with syntax/parse errors
             self.scan_coverage["python_files_skipped"]["parse_error"].append(rel_path)
@@ -724,13 +739,11 @@ class RepoScanner:
     
     def scan(self):
         """Perform the full repository scan."""
-        if not self.root.exists():
-            raise ValueError(f"Root directory does not exist: {self.root}")
+        if not os.path.exists(self.root):
+            raise ValueError("Root directory does not exist: {}".format(self.root))
         
         # Walk the directory tree
         for root_dir, dirs, files in os.walk(self.root):
-            root_path = Path(root_dir)
-            
             # Track cache metrics if enabled
             if self.include_cache_metrics:
                 if "__pycache__" in dirs:
@@ -739,7 +752,7 @@ class RepoScanner:
                     if filename.endswith(".pyc"):
                         self.cache_metrics["pyc_total"] += 1
                         # Check if it's outside __pycache__
-                        if "__pycache__" not in root_path.parts:
+                        if "__pycache__" not in root_dir:
                             self.cache_metrics["pyc_outside_pycache"] += 1
             
             # Skip __pycache__ directories entirely for content scanning
@@ -747,13 +760,16 @@ class RepoScanner:
                 dirs[:] = [d for d in dirs if d != "__pycache__"]
             
             # Filter out ignored directories for content scanning
-            dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not self.should_ignore_for_content_scan(root_path / d)]
+            dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not self.should_ignore_for_content_scan(os.path.join(root_dir, d))]
             
             # Scan Python files for content
             for filename in files:
                 if filename.endswith(".py"):
-                    filepath = root_path / filename
-                    rel_path = str(filepath.relative_to(self.root))
+                    filepath = os.path.join(root_dir, filename)
+                    try:
+                        rel_path = os.path.relpath(filepath, self.root)
+                    except ValueError:
+                        rel_path = filepath
                     
                     # Count all discovered Python files
                     self.scan_coverage["python_files_discovered"] += 1
@@ -774,7 +790,8 @@ class RepoScanner:
                     
                     # Read and analyze
                     try:
-                        content = filepath.read_text(encoding="utf-8", errors="replace")
+                        with open(filepath, 'rb') as f:
+                            content = f.read().decode('utf-8', errors='replace')
                     except UnicodeDecodeError as e:
                         self.scan_coverage["python_files_skipped"]["decode_error"].append(rel_path)
                         continue
@@ -801,7 +818,7 @@ class RepoScanner:
                             "logging_calls": result["logging_calls"]
                         })
     
-    def get_report_data(self) -> Dict[str, Any]:
+    def get_report_data(self):
         """Get structured report data."""
         # Get top files
         top_logging_files = sorted(self.file_logging_counts.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -978,15 +995,15 @@ class RepoScanner:
         
         return data
     
-    def format_markdown(self, data: Dict[str, Any]) -> str:
+    def format_markdown(self, data):
         """Format report data as Markdown."""
         lines = []
         
         # Header
         lines.append("# Logging Audit Report")
         lines.append("")
-        lines.append(f"**Repo Path:** `{data['meta']['repo_path']}`")
-        lines.append(f"**Scan Timestamp:** {data['meta']['scan_timestamp']}")
+        lines.append("**Repo Path:** `{}`".format(data['meta']['repo_path']))
+        lines.append("**Scan Timestamp:** {}".format(data['meta']['scan_timestamp']))
         lines.append("")
         
         # LOC reporting
@@ -1010,7 +1027,7 @@ class RepoScanner:
             data["scan_coverage"]["python_files_skipped"].get("ignored_path", 0)
         )
         if skipped_count > 0:
-            lines.append(f"**Total files excluded:** {skipped_count}")
+            lines.append("**Total files excluded:** {}".format(skipped_count))
             lines.append("")
         
         # Scan Coverage
@@ -1019,18 +1036,20 @@ class RepoScanner:
         lines.append("")
         lines.append("| Metric | Count |")
         lines.append("|--------|-------|")
-        lines.append(f"| Python files discovered | {coverage['python_files_discovered']} |")
-        lines.append(f"| Python files successfully scanned | {coverage['python_files_scanned']} |")
-        lines.append(f"| Python files skipped (ignored path) | {coverage['python_files_skipped']['ignored_path']} |")
-        lines.append(f"| Python files skipped (decode error) | {coverage['python_files_skipped']['decode_error']} |")
-        lines.append(f"| Python files skipped (read error) | {coverage['python_files_skipped']['read_error']} |")
-        lines.append(f"| Python files skipped (parse error) | {coverage['python_files_skipped'].get('parse_error', 0)} |")
+        lines.append("| Python files discovered | {} |".format(coverage['python_files_discovered']))
+        lines.append("| Python files successfully scanned | {} |".format(coverage['python_files_scanned']))
+        lines.append("| Python files skipped (test files) | {} |".format(coverage['python_files_skipped'].get('test_file', 0)))
+        lines.append("| Python files skipped (scanner script) | {} |".format(coverage['python_files_skipped'].get('self_file', 0)))
+        lines.append("| Python files skipped (ignored path) | {} |".format(coverage['python_files_skipped'].get('ignored_path', 0)))
+        lines.append("| Python files skipped (decode error) | {} |".format(coverage['python_files_skipped'].get('decode_error', 0)))
+        lines.append("| Python files skipped (read error) | {} |".format(coverage['python_files_skipped'].get('read_error', 0)))
+        lines.append("| Python files skipped (parse error) | {} |".format(coverage['python_files_skipped'].get('parse_error', 0)))
         lines.append("")
         
         # Show ignored directories
         exclusions = data['meta']['exclusions']
         if exclusions:
-            lines.append(f"**Ignored directories:** {', '.join(exclusions[:20])}{'...' if len(exclusions) > 20 else ''}")
+            lines.append("**Ignored directories:** {}{}".format(', '.join(exclusions[:20]), '...' if len(exclusions) > 20 else ''))
             lines.append("")
         
         # Show sample skipped files if any
@@ -1040,49 +1059,49 @@ class RepoScanner:
         if skipped_detail.get("test_file"):
             lines.append("**Sample skipped files (test files):**")
             for f in skipped_detail["test_file"][:10]:
-                lines.append(f"- `{f}`")
+                lines.append("- `{}`".format(f))
             if len(skipped_detail["test_file"]) > 10:
-                lines.append(f"- ... and {len(skipped_detail['test_file']) - 10} more")
+                lines.append("- ... and {} more".format(len(skipped_detail['test_file']) - 10))
             lines.append("")
         
         # Self file
         if skipped_detail.get("self_file"):
             lines.append("**Skipped files (scanner script):**")
             for f in skipped_detail["self_file"]:
-                lines.append(f"- `{f}`")
+                lines.append("- `{}`".format(f))
             lines.append("")
         
         # Other ignored paths
         if skipped_detail.get("ignored_path"):
             lines.append("**Sample skipped files (ignored path):**")
             for f in skipped_detail["ignored_path"][:5]:
-                lines.append(f"- `{f}`")
+                lines.append("- `{}`".format(f))
             if len(skipped_detail["ignored_path"]) > 5:
-                lines.append(f"- ... and {len(skipped_detail['ignored_path']) - 5} more")
+                lines.append("- ... and {} more".format(len(skipped_detail['ignored_path']) - 5))
             lines.append("")
         
         if skipped_detail["decode_error"]:
             lines.append("**Sample skipped files (decode error):**")
             for f in skipped_detail["decode_error"][:5]:
-                lines.append(f"- `{f}`")
+                lines.append("- `{}`".format(f))
             if len(skipped_detail["decode_error"]) > 5:
-                lines.append(f"- ... and {len(skipped_detail['decode_error']) - 5} more")
+                lines.append("- ... and {} more".format(len(skipped_detail['decode_error']) - 5))
             lines.append("")
         
         if skipped_detail["read_error"]:
             lines.append("**Sample skipped files (read error):**")
             for f in skipped_detail["read_error"][:5]:
-                lines.append(f"- `{f}`")
+                lines.append("- `{}`".format(f))
             if len(skipped_detail["read_error"]) > 5:
-                lines.append(f"- ... and {len(skipped_detail['read_error']) - 5} more")
+                lines.append("- ... and {} more".format(len(skipped_detail['read_error']) - 5))
             lines.append("")
         
         if skipped_detail.get("parse_error"):
             lines.append("**Sample skipped files (parse error):**")
             for f in skipped_detail["parse_error"][:5]:
-                lines.append(f"- `{f}`")
+                lines.append("- `{}`".format(f))
             if len(skipped_detail["parse_error"]) > 5:
-                lines.append(f"- ... and {len(skipped_detail['parse_error']) - 5} more")
+                lines.append("- ... and {} more".format(len(skipped_detail['parse_error']) - 5))
             lines.append("")
         
         # Logging System Identification
@@ -1101,18 +1120,18 @@ class RepoScanner:
             systems_detected.append("unknown/generic")
         
         if systems_detected:
-            lines.append(f"**Systems detected:** {', '.join(systems_detected)}")
+            lines.append("**Systems detected:** {}".format(', '.join(systems_detected)))
         else:
             lines.append("**Systems detected:** None (no logger calls found in production code)")
         lines.append("")
         lines.append("| System | Total Logger Calls |")
         lines.append("|--------|-------------------|")
         if stdlib_total > 0:
-            lines.append(f"| stdlib logging | {stdlib_total} |")
+            lines.append("| stdlib logging | {} |".format(stdlib_total))
         if structlog_total > 0:
-            lines.append(f"| structlog | {structlog_total} |")
+            lines.append("| structlog | {} |".format(structlog_total))
         if generic_total > 0:
-            lines.append(f"| unknown/generic | {generic_total} |")
+            lines.append("| unknown/generic | {} |".format(generic_total))
         lines.append("")
         
         # Logging Usage Summary
@@ -1125,9 +1144,9 @@ class RepoScanner:
         lines.append("")
         lines.append("| Metric | Count |")
         lines.append("|--------|-------|")
-        lines.append(f"| Imports | {stdlib['imports']} |")
-        lines.append(f"| `getLogger()` calls | {stdlib['get_logger_calls']} |")
-        lines.append(f"| Total method calls | {sum(stdlib['method_calls'].values())} |")
+        lines.append("| Imports | {} |".format(stdlib['imports']))
+        lines.append("| `getLogger()` calls | {} |".format(stdlib['get_logger_calls']))
+        lines.append("| Total method calls | {} |".format(sum(stdlib['method_calls'].values())))
         lines.append("")
         
         # structlog
@@ -1137,9 +1156,9 @@ class RepoScanner:
             lines.append("")
             lines.append("| Metric | Count |")
             lines.append("|--------|-------|")
-            lines.append(f"| Imports | {structlog_data['imports']} |")
-            lines.append(f"| `get_logger()` calls | {structlog_data['get_logger_calls']} |")
-            lines.append(f"| Total method calls | {sum(structlog_data['method_calls'].values())} |")
+            lines.append("| Imports | {} |".format(structlog_data['imports']))
+            lines.append("| `get_logger()` calls | {} |".format(structlog_data['get_logger_calls']))
+            lines.append("| Total method calls | {} |".format(sum(structlog_data['method_calls'].values())))
             lines.append("")
         
         # Framework logger calls
@@ -1149,7 +1168,7 @@ class RepoScanner:
             lines.append("")
             lines.append("| Metric | Count |")
             lines.append("|--------|-------|")
-            lines.append(f"| Total method calls | {sum(framework_data['method_calls'].values())} |")
+            lines.append("| Total method calls | {} |".format(sum(framework_data['method_calls'].values())))
             lines.append("")
             lines.append("*Note: Framework logger calls (uvicorn, gunicorn, Flask app.logger, FastAPI logger).*")
             lines.append("")
@@ -1162,7 +1181,7 @@ class RepoScanner:
             lines.append("")
             lines.append("| Metric | Count |")
             lines.append("|--------|-------|")
-            lines.append(f"| Total method calls | {total_generic} |")
+            lines.append("| Total method calls | {} |".format(total_generic))
             lines.append("")
             lines.append("*Note: Logger calls where the logger variable source could not be determined.*")
             lines.append("")
@@ -1172,9 +1191,9 @@ class RepoScanner:
         lines.append("")
         lines.append("| Location | Count |")
         lines.append("|----------|-------|")
-        lines.append(f"| In `scripts/` directories | {data['logging_usage'].get('print_calls_in_scripts', 0)} |")
-        lines.append(f"| Outside `scripts/` | {data['logging_usage'].get('print_calls_outside_scripts', 0)} |")
-        lines.append(f"| **Total** | {data['logging_usage']['print_calls']} |")
+        lines.append("| In `scripts/` directories | {} |".format(data['logging_usage'].get('print_calls_in_scripts', 0)))
+        lines.append("| Outside `scripts/` | {} |".format(data['logging_usage'].get('print_calls_outside_scripts', 0)))
+        lines.append("| **Total** | {} |".format(data['logging_usage']['print_calls']))
         lines.append("")
         
         # Production Error Logging Summary (KEY SECTION)
@@ -1182,23 +1201,23 @@ class RepoScanner:
             error_data = data["error_logging"]
             lines.append("## Production Error Logging Summary")
             lines.append("")
-            lines.append(f"**Total Error-Like Calls:** {error_data['total_error_calls']}")
+            lines.append("**Total Error-Like Calls:** {}".format(error_data['total_error_calls']))
             lines.append("")
             lines.append("### Breakdown by Level")
             lines.append("")
             lines.append("| Level | Count |")
             lines.append("|-------|-------|")
-            lines.append(f"| ERROR | {error_data['error_calls']} |")
-            lines.append(f"| EXCEPTION | {error_data['exception_calls']} |")
-            lines.append(f"| CRITICAL | {error_data['critical_calls']} |")
+            lines.append("| ERROR | {} |".format(error_data['error_calls']))
+            lines.append("| EXCEPTION | {} |".format(error_data['exception_calls']))
+            lines.append("| CRITICAL | {} |".format(error_data['critical_calls']))
             lines.append("")
-            lines.append(f"**Error calls with `exc_info=True`:** {error_data['error_with_exc_info']}")
+            lines.append("**Error calls with `exc_info=True`:** {}".format(error_data['error_with_exc_info']))
             lines.append("")
             lines.append("### Error Message Templates")
             lines.append("")
-            lines.append(f"- **Unique templates (excluding dynamic/unknown):** {error_data['unique_templates']}")
-            lines.append(f"- **Dynamic templates (f-strings, concatenation, etc.):** {error_data['dynamic_templates']}")
-            lines.append(f"- **Unknown templates (no extractable message):** {error_data['unknown_templates']}")
+            lines.append("- **Unique templates (excluding dynamic/unknown):** {}".format(error_data['unique_templates']))
+            lines.append("- **Dynamic templates (f-strings, concatenation, etc.):** {}".format(error_data['dynamic_templates']))
+            lines.append("- **Unknown templates (no extractable message):** {}".format(error_data['unknown_templates']))
             lines.append("")
             if error_data["top_templates"]:
                 lines.append("### Top 20 Error Templates")
@@ -1206,12 +1225,12 @@ class RepoScanner:
                 lines.append("| Template | Count | Example Files |")
                 lines.append("|----------|-------|---------------|")
                 for item in error_data["top_templates"]:
-                    examples = ", ".join([f"`{f}`" for f in item["example_files"][:3]])
+                    examples = ", ".join(["`{}`".format(f) for f in item["example_files"][:3]])
                     if len(item["example_files"]) > 3:
-                        examples += f" (+{len(item['example_files']) - 3} more)"
+                        examples += " (+{} more)".format(len(item['example_files']) - 3)
                     # Truncate long templates for readability
                     template_display = item["template"][:100] + "..." if len(item["template"]) > 100 else item["template"]
-                    lines.append(f"| `{template_display}` | {item['count']} | {examples} |")
+                    lines.append("| `{}` | {} | {} |".format(template_display, item['count'], examples))
                 lines.append("")
         
         # Top Offenders
@@ -1225,7 +1244,7 @@ class RepoScanner:
             lines.append("| File | Calls |")
             lines.append("|------|-------|")
             for item in data["logging_usage"]["top_logging_files"]:
-                lines.append(f"| `{item['file']}` | {item['count']} |")
+                lines.append("| `{}` | {} |".format(item['file'], item['count']))
             lines.append("")
         
         # Top files by error-like calls
@@ -1242,7 +1261,7 @@ class RepoScanner:
                 lines.append("| File | Calls |")
                 lines.append("|------|-------|")
                 for file_path, count in top_error_files:
-                    lines.append(f"| `{file_path}` | {count} |")
+                    lines.append("| `{}` | {} |".format(file_path, count))
                 lines.append("")
         
         # Top files by print calls
@@ -1252,7 +1271,7 @@ class RepoScanner:
             lines.append("| File | Calls |")
             lines.append("|------|-------|")
             for item in data["logging_usage"]["top_print_files"]:
-                lines.append(f"| `{item['file']}` | {item['count']} |")
+                lines.append("| `{}` | {} |".format(item['file'], item['count']))
             lines.append("")
         
         # Log Level Distribution
@@ -1264,10 +1283,10 @@ class RepoScanner:
         for level in ["debug", "info", "warning", "error", "critical", "exception"]:
             count = data["log_levels"].get(level, 0)
             if count > 0:
-                lines.append(f"| {level.upper()} | {count} |")
-        lines.append(f"| **Total** | **{total_logger_calls}** |")
+                lines.append("| {} | {} |".format(level.upper(), count))
+        lines.append("| **Total** | **{}** |".format(total_logger_calls))
         lines.append("")
-        lines.append(f"*Note: Total logger calls = {total_logger_calls}. Level distribution sums must match this total.*")
+        lines.append("*Note: Total logger calls = {}. Level distribution sums must match this total.*".format(total_logger_calls))
         lines.append("")
         
         # Internal consistency check
@@ -1278,9 +1297,9 @@ class RepoScanner:
                 lines.append("")
                 lines.append("**WARNING:** The level distribution total does not match the total logger calls!")
                 lines.append("")
-                lines.append(f"- Level distribution sum: **{check['level_sum']}**")
-                lines.append(f"- Total logger calls: **{check['total_calls']}**")
-                lines.append(f"- Difference: **{check['difference']}**")
+                lines.append("- Level distribution sum: **{}**".format(check['level_sum']))
+                lines.append("- Total logger calls: **{}**".format(check['total_calls']))
+                lines.append("- Difference: **{}**".format(check['difference']))
                 lines.append("")
                 lines.append("This indicates a counting bug. Some files may be partially counted.")
                 lines.append("Please report this issue.")
@@ -1298,7 +1317,7 @@ class RepoScanner:
             for cfg in data["logging_config"]["config_locations"]:
                 json_marker = "Yes" if cfg.get("has_json_formatting") else "No"
                 entry_point = cfg.get("entry_point_likelihood", "unknown")
-                lines.append(f"| `{cfg['file']}` | {cfg['line']} | {cfg['config_type']} | {entry_point} | {json_marker} |")
+                lines.append("| `{}` | {} | {} | {} | {} |".format(cfg['file'], cfg['line'], cfg['config_type'], entry_point, json_marker))
             lines.append("")
             lines.append("*Entry Point: 'import-time' = executed at module import (high risk), 'guarded' = inside function or if __name__ == '__main__' (lower risk)*")
             lines.append("")
@@ -1312,9 +1331,9 @@ class RepoScanner:
         exc_data = data["exceptions"]
         lines.append("| Method | Count |")
         lines.append("|--------|-------|")
-        lines.append(f"| `logger.exception()` | {exc_data['exception_calls']} |")
-        lines.append(f"| `logger.error(..., exc_info=True)` | {exc_data['exc_info_calls']} |")
-        lines.append(f"| `traceback.print_exc()` / `traceback.format_exc()` | {exc_data['traceback_calls']} |")
+        lines.append("| `logger.exception()` | {} |".format(exc_data['exception_calls']))
+        lines.append("| `logger.error(..., exc_info=True)` | {} |".format(exc_data['exc_info_calls']))
+        lines.append("| `traceback.print_exc()` / `traceback.format_exc()` | {} |".format(exc_data['traceback_calls']))
         lines.append("")
         
         if exc_data["bare_except_blocks"]:
@@ -1323,7 +1342,7 @@ class RepoScanner:
             lines.append("| File | Line |")
             lines.append("|------|------|")
             for file_path, line_no in exc_data["bare_except_blocks"]:
-                lines.append(f"| `{file_path}` | {line_no} |")
+                lines.append("| `{}` | {} |".format(file_path, line_no))
             lines.append("")
             lines.append("*Note: Bare except blocks may hide exceptions. Consider using `except Exception:` or specific exception types.*")
             lines.append("")
@@ -1335,7 +1354,7 @@ class RepoScanner:
         
         # Multiple basicConfig
         if findings["multiple_basic_config"]:
-            lines.append(f"⚠️ **Multiple `basicConfig()` calls detected:** {findings['basic_config_count']}")
+            lines.append("⚠️ **Multiple `basicConfig()` calls detected:** {}".format(findings['basic_config_count']))
             lines.append("")
             lines.append("Having multiple `basicConfig()` calls can cause configuration conflicts. Consider consolidating to a single configuration point.")
             lines.append("")
@@ -1344,7 +1363,7 @@ class RepoScanner:
             for cfg in findings["basic_config_locations"]:
                 entry_point = cfg.get("entry_point_likelihood", "unknown")
                 risk = "⚠️ High risk" if entry_point == "import-time" else "✓ Lower risk"
-                lines.append(f"| `{cfg['file']}` | {cfg['line']} | {entry_point} ({risk}) |")
+                lines.append("| `{}` | {} | {} ({}) |".format(cfg['file'], cfg['line'], entry_point, risk))
             lines.append("")
         
         # High print() counts outside scripts/
@@ -1354,7 +1373,7 @@ class RepoScanner:
             lines.append("| File | Print Calls |")
             lines.append("|------|-------------|")
             for item in findings["high_print_counts_outside_scripts"]:
-                lines.append(f"| `{item['file']}` | {item['count']} |")
+                lines.append("| `{}` | {} |".format(item['file'], item['count']))
             lines.append("")
             lines.append("Consider replacing `print()` calls with proper logging in production code.")
             lines.append("")
@@ -1366,7 +1385,7 @@ class RepoScanner:
             lines.append("| File | Print Calls | Logger Calls |")
             lines.append("|------|-------------|-------------|")
             for item in findings["files_with_both_print_and_logger"]:
-                lines.append(f"| `{item['file']}` | {item['print_calls']} | {item['logging_calls']} |")
+                lines.append("| `{}` | {} | {} |".format(item['file'], item['print_calls'], item['logging_calls']))
             lines.append("")
             lines.append("Consider standardizing on logging for consistent output handling.")
             lines.append("")
@@ -1376,7 +1395,7 @@ class RepoScanner:
             lines.append("✅ **JSON logging is enabled:**")
             lines.append("")
             for cfg in findings["json_logging_locations"]:
-                lines.append(f"- `{cfg['file']}:{cfg['line']}` ({cfg['config_type']})")
+                lines.append("- `{}:{}` ({})".format(cfg['file'], cfg['line'], cfg['config_type']))
             lines.append("")
         else:
             lines.append("ℹ️ **JSON logging not detected**")
@@ -1398,7 +1417,7 @@ class RepoScanner:
         
         # High unknown logger usage
         if findings.get("high_unknown_logger_usage"):
-            lines.append(f"⚠️ **High unknown/generic logger usage detected:** {findings.get('unknown_logger_percentage', 0):.1f}%")
+            lines.append("⚠️ **High unknown/generic logger usage detected:** {:.1f}%".format(findings.get('unknown_logger_percentage', 0)))
             lines.append("")
             lines.append("A significant portion of logger calls could not be classified as stdlib or structlog.")
             lines.append("This may indicate:")
@@ -1409,7 +1428,7 @@ class RepoScanner:
         
         # High dynamic error templates
         if findings.get("high_dynamic_error_templates"):
-            lines.append(f"⚠️ **High percentage of dynamic error templates:** {findings.get('dynamic_error_percentage', 0):.1f}%")
+            lines.append("⚠️ **High percentage of dynamic error templates:** {:.1f}%".format(findings.get('dynamic_error_percentage', 0)))
             lines.append("")
             lines.append("Many error messages use f-strings or string concatenation, making it difficult to")
             lines.append("track unique error patterns. Consider using structured logging with consistent")
@@ -1426,10 +1445,10 @@ class RepoScanner:
             lines.append("|---------------|------------|---------------|")
             for var_name, count in data["unknown_logger_vars"]["top_vars"]:
                 example_files = data["unknown_logger_vars"]["var_files"].get(var_name, [])[:3]
-                files_str = ", ".join([f"`{f}`" for f in example_files])
+                files_str = ", ".join(["`{}`".format(f) for f in example_files])
                 if len(data["unknown_logger_vars"]["var_files"].get(var_name, [])) > 3:
-                    files_str += f" (+{len(data['unknown_logger_vars']['var_files'].get(var_name, [])) - 3} more)"
-                lines.append(f"| `{var_name}` | {count} | {files_str} |")
+                    files_str += " (+{} more)".format(len(data['unknown_logger_vars']['var_files'].get(var_name, [])) - 3)
+                lines.append("| `{}` | {} | {} |".format(var_name, count, files_str))
             lines.append("")
         
         # Cache metrics (if enabled)
@@ -1439,9 +1458,9 @@ class RepoScanner:
             cache = data["cache_metrics"]
             lines.append("| Metric | Count |")
             lines.append("|--------|-------|")
-            lines.append(f"| `__pycache__/` directories | {cache['pycache_dirs']} |")
-            lines.append(f"| `*.pyc` files (total, including `__pycache__/`) | {cache['pyc_total']} |")
-            lines.append(f"| `*.pyc` files (outside `__pycache__/`) | {cache['pyc_outside_pycache']} |")
+            lines.append("| `__pycache__/` directories | {} |".format(cache['pycache_dirs']))
+            lines.append("| `*.pyc` files (total, including `__pycache__/`) | {} |".format(cache['pyc_total']))
+            lines.append("| `*.pyc` files (outside `__pycache__/`) | {} |".format(cache['pyc_outside_pycache']))
             lines.append("")
         
         return "\n".join(lines)
@@ -1450,10 +1469,10 @@ class RepoScanner:
 def main():
     """Main entry point."""
     # Determine default root (script_dir/../..)
-    script_path = Path(__file__).resolve()
-    script_dir = script_path.parent
+    script_path = os.path.abspath(os.path.realpath(__file__))
+    script_dir = os.path.dirname(script_path)
     # Go up two levels: tools/dev -> tools -> repo root
-    default_root = script_dir.parent.parent.resolve()
+    default_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
     
     parser = argparse.ArgumentParser(
         description="Logging audit tool for Python repositories (STRICTLY READ-ONLY)",
@@ -1477,7 +1496,7 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
         "--root",
         type=str,
         default=None,
-        help=f"Root directory to scan (default: {default_root})"
+        help="Root directory to scan (default: {})".format(default_root)
     )
     # No output flags - STDOUT only, strictly read-only (no file writing)
     parser.add_argument(
@@ -1493,21 +1512,21 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
     if args.root:
         # Normalize the path to handle any weird shell parsing
         root_str = str(args.root).strip().strip('"').strip("'")
-        root = Path(root_str).resolve()
+        root = os.path.abspath(os.path.realpath(root_str))
     else:
         root = default_root
     
-    if not root.exists():
-        print(f"Error: Root directory does not exist: {root}", file=sys.stderr)
-        print(f"  (Resolved from: {args.root if args.root else 'default'})", file=sys.stderr)
+    if not os.path.exists(root):
+        print("Error: Root directory does not exist: {}".format(root), file=sys.stderr)
+        print("  (Resolved from: {})".format(args.root if args.root else 'default'), file=sys.stderr)
         return 1
     
     # Perform scan
-    scanner = RepoScanner(str(root), include_cache_metrics=args.include_cache_metrics)
+    scanner = RepoScanner(root, include_cache_metrics=args.include_cache_metrics)
     try:
         scanner.scan()
     except Exception as e:
-        print(f"Error during scan: {e}", file=sys.stderr)
+        print("Error during scan: {}".format(e), file=sys.stderr)
         return 1
     
     # Get report data
