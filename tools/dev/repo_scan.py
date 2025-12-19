@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 STRICTLY READ-ONLY production logging audit tool for Python repositories.
 
@@ -272,10 +272,8 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 # Check for exc_info=True in keyword arguments
                 for kw in node.keywords:
                     if kw.arg == "exc_info":
-                        # Handle both ast.Constant (Python 3.8+) and ast.NameConstant (Python <3.8)
-                        if isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                            self.exc_info_calls += 1
-                        elif isinstance(kw.value, ast.NameConstant) and kw.value.value is True:  # Python <3.8 compatibility
+                        # Handle ast.NameConstant (Python 2.7/3.x compatibility)
+                        if isinstance(kw.value, ast.NameConstant) and kw.value.value is True:
                             self.exc_info_calls += 1
                 
                 # Check if it's logging.info(...) - direct stdlib call
@@ -409,18 +407,15 @@ class LoggingASTVisitor(ast.NodeVisitor):
         
         first_arg = node.args[0]
         
-        # String literal (handle both old ast.Str and new ast.Constant)
-        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
-            template = first_arg.value
-        elif isinstance(first_arg, ast.Str):  # Python <3.8 compatibility
+        # String literal (use ast.Str for Python 2.7 compatibility)
+        if isinstance(first_arg, ast.Str):
             template = first_arg.s
-        # f-string (JoinedStr)
-        elif isinstance(first_arg, ast.JoinedStr):
+        # f-string (JoinedStr) - Python 3.6+ only, skip in Python 2.7
+        # Note: ast.JoinedStr doesn't exist in Python 2.7
+        elif hasattr(ast, 'JoinedStr') and isinstance(first_arg, ast.JoinedStr):
             parts = []
             for value in first_arg.values:
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    parts.append(value.value)
-                elif isinstance(value, ast.Str):  # Python <3.8 compatibility
+                if isinstance(value, ast.Str):
                     parts.append(value.s)
                 else:
                     parts.append("{...}")
@@ -449,9 +444,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             self._extract_string_parts(node.left, parts)
             self._extract_string_parts(node.right, parts)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            parts.append(node.value)
-        elif isinstance(node, ast.Str):  # Python <3.8 compatibility
+        elif isinstance(node, ast.Str):
             parts.append(node.s)
     
     def check_json_formatting(self):
@@ -1536,14 +1529,29 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
     output = scanner.format_markdown(report_data)
     
     # Write to stdout with UTF-8 encoding (ONLY output method - no files)
+    # Python 2.7 compatibility: handle unicode output properly
     try:
         if hasattr(sys.stdout, "reconfigure"):
+            # Python 3.7+ has reconfigure
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stdout.write(output)
+            sys.stdout.write(output)
+        elif sys.version_info[0] >= 3:
+            # Python 3 without reconfigure
+            sys.stdout.write(output)
+        else:
+            # Python 2.7: encode unicode to bytes for stdout
+            if isinstance(output, unicode):
+                sys.stdout.write(output.encode("utf-8", errors="replace"))
+            else:
+                sys.stdout.write(output)
         sys.stdout.flush()
-    except (UnicodeEncodeError, AttributeError):
-        # Fallback for Python 2 or systems without reconfigure
-        print(output.encode("utf-8", errors="replace").decode("utf-8", errors="replace"))
+    except (UnicodeEncodeError, AttributeError, UnicodeDecodeError):
+        # Fallback: try to print directly (Python 2.7 will handle unicode if terminal supports it)
+        try:
+            print(output)
+        except UnicodeEncodeError:
+            # Last resort: encode to ASCII with replacement
+            print(output.encode("ascii", errors="replace"))
     
     return 0
 
