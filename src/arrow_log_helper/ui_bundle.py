@@ -66,8 +66,14 @@ def _compute_location_short(path, line_no):
         return "%s:%s" % (str(path), str(line_no))
 
 
-def _compute_enclosure_display_name(enclosure_type, name, signature):
-    """Format enclosure as 'def name(args)' or 'class Name' or '<none>'."""
+def _compute_enclosure_display_name(enclosure_type, name, signature, def_line_text=None):
+    """Format enclosure as 'def name(args)' or 'class Name' or '<none>'.
+    
+    Prefers def_line_text (clean def/class line without decorators) over signature.
+    """
+    # Prefer def_line_text if available (cleaner, no decorators)
+    if def_line_text:
+        return def_line_text
     if signature:
         return signature
     if enclosure_type in ("def", "async_def") and name:
@@ -90,7 +96,8 @@ def _generate_summary_text(match, parsed, search_message):
     enclosure_type = match.get("enclosure_type") or "none"
     name = match.get("name")
     signature = match.get("signature")
-    display_name = _compute_enclosure_display_name(enclosure_type, name, signature)
+    def_line_text = match.get("def_line_text")
+    display_name = _compute_enclosure_display_name(enclosure_type, name, signature, def_line_text)
     lines.append("Function/Enclosure: %s" % (display_name,))
     
     # Match info

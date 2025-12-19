@@ -58,7 +58,24 @@ class ExtractEnclosureAsyncDecoratorsTest(unittest.TestCase):
         self.assertGreaterEqual(end_line, match_line_no,
                                "end_line (%d) should be >= match_line_no (%d)" % (end_line, match_line_no))
         
-        # Assert decorator is included
+        # Assert decorator is separated
+        decorator_lines = enc.get("decorator_lines", [])
+        self.assertEqual(len(decorator_lines), 1, "Should have one decorator line")
+        self.assertIn("@app.on_event", decorator_lines[0])
+        
+        # Assert def line is separate (no decorators)
+        def_line = enc.get("def_line_text")
+        self.assertEqual(def_line, "async def startup_event():")
+        self.assertNotIn("@", def_line, "def_line_text should not include decorators")
+        
+        # Assert line numbers
+        self.assertEqual(enc.get("decorator_start_line"), enc.get("def_line_no") - 1)
+        
+        # Assert containment flag
+        self.assertTrue(enc.get("enclosure_contains_match"), 
+                       "enclosure_contains_match should be True")
+        
+        # Assert block still includes everything
         block = enc.get("block", "")
         self.assertIn("@app.on_event", block,
                      "Block should include decorator @app.on_event")

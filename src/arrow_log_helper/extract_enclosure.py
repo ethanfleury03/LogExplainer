@@ -110,6 +110,162 @@ def _parse_class_name(line):
     return m.group(1) if m else None
 
 
+def _extract_docstring(lines, start_idx, end_idx, header_idx):
+    """
+    Extract Python docstring from function/class body.
+    Returns (docstring_text, docstring_start_line, docstring_end_line) or (None, None, None).
+    """
+    # Docstring is the first statement in the body (after the def/class line)
+    # Look for triple-quoted string immediately after header
+    max_docstring_size = 16 * 1024  # Cap at 16KB
+    
+    # Start searching after the header line
+    header_indent = _indent_width(lines[header_idx]) if header_idx < len(lines) else 0
+    
+    for k in range(header_idx + 1, min(end_idx + 1, len(lines))):
+        line = lines[k] if k < len(lines) else ""
+        if not line:
+            continue
+        
+        stripped = line.lstrip()
+        # Skip blank lines and comments
+        if not stripped or stripped.startswith("#"):
+            continue
+        
+        # Check indentation - docstring should be indented more than header (inside function)
+        line_indent = _indent_width(line)
+        if line_indent <= header_indent:
+            # Not indented enough to be a docstring, might be module-level or next function
+            break
+        
+        # Check for triple-quote docstring
+        if stripped.startswith('"""') or stripped.startswith("'''"):
+            quote_char = stripped[0:3]
+            # One-line docstring: """text"""
+            if stripped.endswith(quote_char) and len(stripped) > 6:
+                docstring = stripped[3:-3]
+                if len(docstring) <= max_docstring_size:
+                    return (docstring, k + 1, k + 1)
+            
+            # Multi-line docstring
+            docstring_lines = [stripped[3:]]  # First line without opening quote
+            docstring_start = k + 1
+            found_closing = False
+            
+            for j in range(k + 1, min(end_idx + 1, len(lines))):
+                next_line = lines[j] if j < len(lines) else ""
+                
+                # Check if this line contains the closing quote
+                if quote_char in next_line:
+                    # Find the closing quote
+                    idx = next_line.find(quote_char)
+                    if idx >= 0:
+                        # Extract text before closing quote
+                        if idx > 0:
+                            docstring_lines.append(next_line[:idx])
+                        found_closing = True
+                        docstring_end = j + 1
+                        break
+                else:
+                    # No closing quote yet, add entire line
+                    docstring_lines.append(next_line)
+                
+                # Safety: cap size
+                total_size = sum(len(l) for l in docstring_lines)
+                if total_size > max_docstring_size:
+                    break
+            
+            if found_closing:
+                docstring_text = "\n".join(docstring_lines).strip()
+                if docstring_text:
+                    return (docstring_text, docstring_start, docstring_end)
+        
+        # If we hit non-docstring code, no docstring exists
+        break
+    
+    return (None, None, None)
+
+
+def _extract_leading_comment_block(lines, def_line_no, max_window=25):
+    """
+    Extract leading comment block directly above def/class line.
+    Returns (comment_block, start_line, end_line) or (None, None, None).
+    """
+    # def_line_no is 1-based, convert to 0-based index
+    def_idx = def_line_no - 1
+    if def_idx <= 0:
+        return (None, None, None)
+    
+    comment_lines = []
+    start_idx = None
+    end_idx = None
+    blank_gap = 0
+    max_blank_gap = 1  # Allow at most 1 blank line gap
+    
+    # Walk upward from def line
+    for k in range(def_idx - 1, max(-1, def_idx - max_window - 1), -1):
+        if k < 0:
+            break
+        
+        line = lines[k] if k < len(lines) else ""
+        stripped = line.lstrip()
+        
+        if not stripped:
+            # Blank line - allow small gap
+            blank_gap += 1
+            if blank_gap > max_blank_gap:
+                break
+            continue
+        
+        blank_gap = 0  # Reset gap counter
+        
+        # Check for comment or triple-quote block
+        if stripped.startswith("#"):
+            comment_lines.insert(0, line)
+            if end_idx is None:
+                end_idx = k
+            start_idx = k
+        elif stripped.startswith('"""') or stripped.startswith("'''"):
+            # Triple-quote block above def (treat as header block)
+            quote_char = stripped[0:3]
+            block_lines = [line]
+            
+            # Check if it's a one-liner
+            if stripped.endswith(quote_char) and len(stripped) > 6:
+                comment_lines.insert(0, line)
+                if end_idx is None:
+                    end_idx = k
+                start_idx = k
+            else:
+                # Multi-line, collect upward to find opening quote
+                found_opening = False
+                for j in range(k - 1, max(-1, k - max_window), -1):
+                    if j < 0:
+                        break
+                    prev_line = lines[j] if j < len(lines) else ""
+                    block_lines.insert(0, prev_line)
+                    # Check if this line has the opening quote
+                    if quote_char in prev_line:
+                        found_opening = True
+                        break
+                
+                if found_opening or len(block_lines) > 0:
+                    comment_lines = block_lines + comment_lines
+                    if end_idx is None:
+                        end_idx = k
+                    start_idx = j if (j >= 0 and found_opening) else k
+        else:
+            # Non-comment, non-blank line - stop
+            break
+    
+    if comment_lines:
+        comment_block = "\n".join(comment_lines)
+        return (comment_block, start_idx + 1 if start_idx is not None else None, 
+                end_idx + 1 if end_idx is not None else None)
+    
+    return (None, None, None)
+
+
 def extract_enclosure(path, match_line_no, context_fallback=50):
     """
     Extract enclosing def/class for a match location with guaranteed containment.
@@ -124,6 +280,17 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
         "start_line": 1,
         "end_line": 1,
         "block": "",
+        "decorator_lines": [],
+        "def_line_text": None,
+        "decorator_start_line": None,
+        "def_line_no": None,
+        "enclosure_contains_match": False,
+        "docstring_text": None,
+        "docstring_start_line": None,
+        "docstring_end_line": None,
+        "leading_comment_block": None,
+        "leading_comment_start_line": None,
+        "leading_comment_end_line": None,
     }
 
     if not path:
@@ -160,12 +327,15 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
 
     def compute_block_bounds(header_idx):
         """Compute start and end indices for a block starting at header_idx.
-        Returns (start_idx, end_idx) where start_idx may include decorators.
+        Returns (start_idx, end_idx, decorator_start_idx, decorator_lines) 
+        where start_idx may include decorators.
         """
         header_line = lines[header_idx]
         base_indent = _indent_width(header_line)
 
-        # Include decorators directly above the header (contiguous, same or greater indent).
+        # Collect decorators directly above the header (contiguous, same or greater indent).
+        decorator_lines = []
+        decorator_start_idx = None
         start_idx = header_idx
         k = header_idx - 1
         while k >= 0:
@@ -176,6 +346,9 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
             decorator_indent = _indent_width(line_k)
             if decorator_indent < base_indent:
                 break
+            decorator_lines.insert(0, line_k.rstrip())
+            if decorator_start_idx is None:
+                decorator_start_idx = k
             start_idx = k
             k -= 1
 
@@ -210,7 +383,7 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
                     if is_header_line(s) or (ind == 0 and not stripped.startswith("#")):
                         break
             end_idx = k
-        return start_idx, end_idx
+        return start_idx, end_idx, decorator_start_idx, decorator_lines
 
     def validate_containment(start_idx, end_idx, match_idx):
         """Validate that match_idx is contained within [start_idx, end_idx]."""
@@ -232,26 +405,68 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
         is_class = _is_class(header_line)
 
         if is_def or is_async:
-            start_idx, end_idx = compute_block_bounds(header_idx)
+            start_idx, end_idx, decorator_start_idx, decorator_lines = compute_block_bounds(header_idx)
             # Validate containment
-            if validate_containment(start_idx, end_idx, i):
+            contains_match = validate_containment(start_idx, end_idx, i)
+            if contains_match:
                 out["enclosure_type"] = "async_def" if is_async else "def"
                 out["name"] = _parse_def_name(header_line)
                 out["start_line"] = start_idx + 1
                 out["end_line"] = end_idx + 1
                 out["block"] = u"\n".join(lines[start_idx : end_idx + 1])
+                
+                # Separate decorators from def line
+                out["decorator_lines"] = decorator_lines
+                out["def_line_text"] = header_line.strip()
+                out["def_line_no"] = header_idx + 1
+                out["decorator_start_line"] = (decorator_start_idx + 1) if decorator_start_idx is not None else None
+                out["enclosure_contains_match"] = True
+                
+                # Extract docstring
+                docstring_text, docstring_start, docstring_end = _extract_docstring(lines, start_idx, end_idx, header_idx)
+                out["docstring_text"] = docstring_text
+                out["docstring_start_line"] = docstring_start
+                out["docstring_end_line"] = docstring_end
+                
+                # Extract leading comment block
+                comment_block, comment_start, comment_end = _extract_leading_comment_block(lines, header_idx + 1)
+                out["leading_comment_block"] = comment_block
+                out["leading_comment_start_line"] = comment_start
+                out["leading_comment_end_line"] = comment_end
+                
                 return out
             # If not contained, continue searching upward
 
         elif is_class:
-            start_idx, end_idx = compute_block_bounds(header_idx)
+            start_idx, end_idx, decorator_start_idx, decorator_lines = compute_block_bounds(header_idx)
             # Validate containment
-            if validate_containment(start_idx, end_idx, i):
+            contains_match = validate_containment(start_idx, end_idx, i)
+            if contains_match:
                 out["enclosure_type"] = "class"
                 out["name"] = _parse_class_name(header_line)
                 out["start_line"] = start_idx + 1
                 out["end_line"] = end_idx + 1
                 out["block"] = u"\n".join(lines[start_idx : end_idx + 1])
+                
+                # Separate decorators from class line
+                out["decorator_lines"] = decorator_lines
+                out["def_line_text"] = header_line.strip()
+                out["def_line_no"] = header_idx + 1
+                out["decorator_start_line"] = (decorator_start_idx + 1) if decorator_start_idx is not None else None
+                out["enclosure_contains_match"] = True
+                
+                # Extract docstring
+                docstring_text, docstring_start, docstring_end = _extract_docstring(lines, start_idx, end_idx, header_idx)
+                out["docstring_text"] = docstring_text
+                out["docstring_start_line"] = docstring_start
+                out["docstring_end_line"] = docstring_end
+                
+                # Extract leading comment block
+                comment_block, comment_start, comment_end = _extract_leading_comment_block(lines, header_idx + 1)
+                out["leading_comment_block"] = comment_block
+                out["leading_comment_start_line"] = comment_start
+                out["leading_comment_end_line"] = comment_end
+                
                 return out
             # If not contained, continue searching upward
 
@@ -267,17 +482,23 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
     out["start_line"] = None
     out["end_line"] = None
     out["block"] = u"\n".join(lines[lo : hi + 1])
+    out["enclosure_contains_match"] = False  # Module-level has no containment
     out["notes"] = "No enclosing def/class found; returning module-level context window."
     return out
 
 
 def extract_signature_only(enclosure_dict):
     """
-    Extract signature line(s) for def/class enclosures.
-    Includes decorators if present.
+    Extract signature line for def/class enclosures (def/class line only, no decorators).
     Returns a string or None.
     """
     enclosure_dict = enclosure_dict or {}
+    # Use def_line_text if available (already separated from decorators)
+    def_line_text = enclosure_dict.get("def_line_text")
+    if def_line_text:
+        return def_line_text
+    
+    # Fallback: extract from block
     enc_type = enclosure_dict.get("enclosure_type")
     block = enclosure_dict.get("block") or ""
     try:
@@ -286,37 +507,13 @@ def extract_signature_only(enclosure_dict):
         lines = []
 
     if enc_type in ("def", "async_def"):
-        # Find the def line
-        def_line = None
-        def_idx = None
-        for idx, ln in enumerate(lines):
+        for ln in lines:
             if ln is None:
                 continue
             stripped = ln.lstrip()
             if stripped.startswith("def ") or stripped.startswith("async def "):
-                def_line = ln.strip()
-                def_idx = idx
-                break
-        
-        if def_line is None:
-            return None
-        
-        # Check for decorators above the def
-        decorators = []
-        for idx in range(def_idx - 1, -1, -1):
-            ln = lines[idx] if idx < len(lines) else None
-            if ln is None:
-                break
-            stripped = ln.lstrip()
-            if stripped.startswith("@"):
-                decorators.insert(0, ln.strip())
-            else:
-                break
-        
-        # Return decorators + def line
-        if decorators:
-            return "\n".join(decorators + [def_line])
-        return def_line
+                return ln.strip()
+        return None
     
     if enc_type == "class":
         for ln in lines:

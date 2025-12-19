@@ -158,6 +158,18 @@ def analyze(text, settings=None, progress_cb=None, defaults_module=None):
         merged["start_line"] = enc.get("start_line")
         merged["end_line"] = enc.get("end_line")
         merged["signature"] = signature
+        # Pass through new fields
+        merged["decorator_lines"] = enc.get("decorator_lines", [])
+        merged["def_line_text"] = enc.get("def_line_text")
+        merged["decorator_start_line"] = enc.get("decorator_start_line")
+        merged["def_line_no"] = enc.get("def_line_no")
+        merged["enclosure_contains_match"] = enc.get("enclosure_contains_match", False)
+        merged["docstring_text"] = enc.get("docstring_text")
+        merged["docstring_start_line"] = enc.get("docstring_start_line")
+        merged["docstring_end_line"] = enc.get("docstring_end_line")
+        merged["leading_comment_block"] = enc.get("leading_comment_block")
+        merged["leading_comment_start_line"] = enc.get("leading_comment_start_line")
+        merged["leading_comment_end_line"] = enc.get("leading_comment_end_line")
         if signature is None and enc.get("enclosure_type") in ("none", "window", "module"):
             merged["context_preview"] = enc.get("block")
         else:

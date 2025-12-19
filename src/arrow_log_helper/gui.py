@@ -688,9 +688,48 @@ class ArrowLogHelperApp(object):
         
         selected = self.current_bundle.get("selected")
         
-        # Update Summary
+        # Update Summary (enhanced with decorators, docstrings, comments)
         if selected:
-            summary = selected.get("summary_text", "")
+            summary_lines = []
+            summary_lines.append(selected.get("summary_text", ""))
+            
+            # Add decorators if present
+            decorator_lines = selected.get("decorator_lines") or []
+            if decorator_lines:
+                summary_lines.append("")
+                summary_lines.append("Decorator(s):")
+                for dec in decorator_lines:
+                    summary_lines.append("  %s" % (_safe_text(dec),))
+            
+            # Add leading comment block if present
+            leading_comment = selected.get("leading_comment_block")
+            if leading_comment:
+                summary_lines.append("")
+                summary_lines.append("Header comment (above function):")
+                # Truncate if too long
+                comment_text = _safe_text(leading_comment)
+                if len(comment_text) > 200:
+                    comment_text = comment_text[:197] + "..."
+                summary_lines.append(comment_text)
+            
+            # Add docstring if present
+            docstring = selected.get("docstring_text")
+            if docstring:
+                summary_lines.append("")
+                summary_lines.append("Docstring (inside function):")
+                # Truncate if too long
+                docstring_text = _safe_text(docstring)
+                if len(docstring_text) > 200:
+                    docstring_text = docstring_text[:197] + "..."
+                summary_lines.append(docstring_text)
+            
+            # Add containment flag
+            contains_match = selected.get("enclosure_contains_match")
+            if contains_match is not None:
+                summary_lines.append("")
+                summary_lines.append("Containment validated: %s" % ("Yes" if contains_match else "No",))
+            
+            summary = "\n".join(summary_lines)
         else:
             summary = "No match selected."
         self._set_text_readonly(self.summary_text, summary)
@@ -774,12 +813,37 @@ class ArrowLogHelperApp(object):
         
         # Add selected match fields
         if selected:
-            for key in ("match_type", "name", "path", "line_no", "score", "enclosure_type"):
+            for key in ("match_type", "name", "path", "line_no", "score", "enclosure_type", 
+                       "def_line_no", "decorator_start_line", "enclosure_contains_match"):
                 if key in selected:
                     value = _safe_text(selected[key])
                     if len(value) > 60:
                         value = value[:57] + "..."
                     self.metadata_tree.insert("", tk.END, text="match.%s" % (_safe_text(key),), values=(value,))
+            
+            # Add decorator_lines as a special field
+            decorator_lines = selected.get("decorator_lines") or []
+            if decorator_lines:
+                decorator_text = "; ".join([_safe_text(d) for d in decorator_lines])
+                if len(decorator_text) > 60:
+                    decorator_text = decorator_text[:57] + "..."
+                self.metadata_tree.insert("", tk.END, text="match.decorator_lines", values=(decorator_text,))
+            
+            # Add docstring fields
+            docstring_text = selected.get("docstring_text")
+            if docstring_text:
+                docstring_display = _safe_text(docstring_text)
+                if len(docstring_display) > 60:
+                    docstring_display = docstring_display[:57] + "..."
+                self.metadata_tree.insert("", tk.END, text="match.docstring_text", values=(docstring_display,))
+            
+            # Add leading comment block
+            leading_comment = selected.get("leading_comment_block")
+            if leading_comment:
+                comment_display = _safe_text(leading_comment)
+                if len(comment_display) > 60:
+                    comment_display = comment_display[:57] + "..."
+                self.metadata_tree.insert("", tk.END, text="match.leading_comment_block", values=(comment_display,))
         
         # Add scan stats
         for key in ("files_scanned", "hits_found", "elapsed_seconds", "stopped_reason"):
@@ -845,6 +909,10 @@ class ArrowLogHelperApp(object):
         if key.startswith("match."):
             field = key[6:]
             selected = self.current_bundle.get("selected") or {}
+            # Handle special fields
+            if field == "decorator_lines":
+                decorator_lines = selected.get("decorator_lines") or []
+                return "\n".join([_safe_text(d) for d in decorator_lines])
             return selected.get(field)
         elif key.startswith("scan."):
             field = key[5:]
