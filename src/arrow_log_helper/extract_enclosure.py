@@ -189,6 +189,7 @@ def _extract_docstring(lines, start_idx, end_idx, header_idx):
 def _extract_leading_comment_block(lines, def_line_no, max_window=25):
     """
     Extract leading comment block directly above def/class line.
+    Skips decorators to find comments above them.
     Returns (comment_block, start_line, end_line) or (None, None, None).
     """
     # def_line_no is 1-based, convert to 0-based index
@@ -202,7 +203,7 @@ def _extract_leading_comment_block(lines, def_line_no, max_window=25):
     blank_gap = 0
     max_blank_gap = 1  # Allow at most 1 blank line gap
     
-    # Walk upward from def line
+    # Walk upward from def line, skipping decorators
     for k in range(def_idx - 1, max(-1, def_idx - max_window - 1), -1):
         if k < 0:
             break
@@ -215,6 +216,11 @@ def _extract_leading_comment_block(lines, def_line_no, max_window=25):
             blank_gap += 1
             if blank_gap > max_blank_gap:
                 break
+            continue
+        
+        # Skip decorators (they're between comments and def, but we want comments above decorators)
+        if _is_decorator(line):
+            blank_gap = 0  # Reset gap when we hit decorator
             continue
         
         blank_gap = 0  # Reset gap counter
@@ -243,6 +249,9 @@ def _extract_leading_comment_block(lines, def_line_no, max_window=25):
                     if j < 0:
                         break
                     prev_line = lines[j] if j < len(lines) else ""
+                    # Skip decorators when collecting multi-line quote block
+                    if _is_decorator(prev_line):
+                        continue
                     block_lines.insert(0, prev_line)
                     # Check if this line has the opening quote
                     if quote_char in prev_line:
@@ -255,7 +264,7 @@ def _extract_leading_comment_block(lines, def_line_no, max_window=25):
                         end_idx = k
                     start_idx = j if (j >= 0 and found_opening) else k
         else:
-            # Non-comment, non-blank line - stop
+            # Non-comment, non-blank, non-decorator line - stop
             break
     
     if comment_lines:
@@ -347,8 +356,8 @@ def extract_enclosure(path, match_line_no, context_fallback=50):
             if decorator_indent < base_indent:
                 break
             decorator_lines.insert(0, line_k.rstrip())
-            if decorator_start_idx is None:
-                decorator_start_idx = k
+            # Track the first decorator (lowest line number, furthest from def)
+            decorator_start_idx = k
             start_idx = k
             k -= 1
 
