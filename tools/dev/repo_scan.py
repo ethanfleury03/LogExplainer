@@ -55,9 +55,10 @@ DEFAULT_IGNORE_DIRS = {
 class LoggingASTVisitor(ast.NodeVisitor):
     """AST visitor to extract logging patterns from Python code."""
     
-    def __init__(self, file_content: str):
+    def __init__(self, file_content: str, file_path: str = ""):
         self.file_content = file_content
         self.lines = file_content.splitlines()
+        self.file_path = file_path
         
         # Import tracking
         self.has_stdlib_logging = False
@@ -90,6 +91,8 @@ class LoggingASTVisitor(ast.NodeVisitor):
         self.framework_calls = defaultdict(int)  # level -> count
         self.generic_calls = defaultdict(int)  # level -> count
         self.print_calls = 0
+        self.print_calls_in_scripts = 0
+        self.print_calls_outside_scripts = 0
         
         # Exception/stack trace tracking
         self.exception_calls = 0  # logger.exception()
@@ -125,9 +128,23 @@ class LoggingASTVisitor(ast.NodeVisitor):
         if node.module == "logging":
             self.has_stdlib_logging = True
             self.stdlib_imports += 1
+            # Track getLogger imports from logging
+            for alias in node.names:
+                if alias.name == "getLogger":
+                    if alias.asname:
+                        self.import_aliases[alias.asname] = (node.module, alias.name)
+                    else:
+                        self.import_aliases["getLogger"] = (node.module, alias.name)
         elif node.module == "structlog":
             self.has_structlog = True
             self.structlog_imports += 1
+            # Track get_logger imports from structlog
+            for alias in node.names:
+                if alias.name == "get_logger":
+                    if alias.asname:
+                        self.import_aliases[alias.asname] = (node.module, alias.name)
+                    else:
+                        self.import_aliases["get_logger"] = (node.module, alias.name)
         elif node.module == "loguru":
             self.has_loguru = True
             self.loguru_imports += 1
@@ -173,13 +190,20 @@ class LoggingASTVisitor(ast.NodeVisitor):
                     self.structlog_getlogger_calls += 1
                     logger_type = "structlog"
             
-            # Check imported get_logger functions (e.g., from backend.logging_config import get_logger)
+            # Check imported get_logger/getLogger functions
             elif isinstance(call.func, ast.Name):
                 func_name = call.func.id
                 if func_name in self.import_aliases:
                     module, orig_name = self.import_aliases[func_name]
+                    # Check if it's from logging or structlog
+                    if module == "logging" and orig_name == "getLogger":
+                        self.stdlib_getlogger_calls += 1
+                        logger_type = "stdlib"
+                    elif module == "structlog" and orig_name == "get_logger":
+                        self.structlog_getlogger_calls += 1
+                        logger_type = "structlog"
                     # Heuristic: if it's from a logging config module, treat as stdlib
-                    if "log" in module.lower() or "log" in orig_name.lower():
+                    elif "log" in module.lower() or "log" in orig_name.lower():
                         logger_type = "stdlib"
             
             # Track variable names
@@ -204,9 +228,14 @@ class LoggingASTVisitor(ast.NodeVisitor):
     
     def visit_Call(self, node):
         """Track function calls (logging, print, config, exceptions)."""
-        # Print calls
+        # Print calls - split by scripts/ path
         if isinstance(node.func, ast.Name) and node.func.id == "print":
             self.print_calls += 1
+            # Check if file path contains scripts/ (case-insensitive)
+            if self.file_path and ("\\scripts\\" in self.file_path.lower() or "/scripts/" in self.file_path.lower()):
+                self.print_calls_in_scripts += 1
+            else:
+                self.print_calls_outside_scripts += 1
             return
         
         # Traceback calls
@@ -223,19 +252,26 @@ class LoggingASTVisitor(ast.NodeVisitor):
             if attr_name in ("debug", "info", "warning", "error", "critical", "exception"):
                 line_no = node.lineno
                 
-                # Track exception() calls
+                # Track exception() calls (separate from error level)
                 if attr_name == "exception":
                     self.exception_calls += 1
+                    # Count as EXCEPTION level, not ERROR
+                    level_to_count = "exception"
+                else:
+                    level_to_count = attr_name
                 
                 # Check for exc_info=True in keyword arguments
                 for kw in node.keywords:
-                    if kw.arg == "exc_info" and isinstance(kw.value, ast.NameConstant) and kw.value.value is True:
-                        self.exc_info_calls += 1
+                    if kw.arg == "exc_info":
+                        # Handle both ast.NameConstant (Python <3.8) and ast.Constant (Python 3.8+)
+                        if (isinstance(kw.value, ast.NameConstant) and kw.value.value is True) or \
+                           (isinstance(kw.value, ast.Constant) and kw.value.value is True):
+                            self.exc_info_calls += 1
                 
                 # Check if it's logging.info(...) - direct stdlib call
                 if (isinstance(node.func.value, ast.Name) and 
                     node.func.value.id == "logging"):
-                    self.stdlib_calls[attr_name] += 1
+                    self.stdlib_calls[level_to_count] += 1
                     return
                 
                 # Framework logger detection
@@ -244,27 +280,27 @@ class LoggingASTVisitor(ast.NodeVisitor):
                     if (isinstance(node.func.value.value, ast.Name) and
                         node.func.value.value.id in ("app", "current_app") and
                         node.func.value.attr == "logger"):
-                        self.framework_calls[attr_name] += 1
+                        self.framework_calls[level_to_count] += 1
                         return
                     
                     # fastapi.logger.*
                     if (isinstance(node.func.value.value, ast.Name) and
                         node.func.value.value.id == "fastapi" and
                         node.func.value.attr == "logger"):
-                        self.framework_calls[attr_name] += 1
+                        self.framework_calls[level_to_count] += 1
                         return
                 
                 # Check if it's a known logger variable
                 if isinstance(node.func.value, ast.Name):
                     var_name = node.func.value.id
                     if var_name in self.structlog_loggers:
-                        self.structlog_calls[attr_name] += 1
+                        self.structlog_calls[level_to_count] += 1
                         return
                     elif var_name in self.stdlib_loggers:
-                        self.stdlib_calls[attr_name] += 1
+                        self.stdlib_calls[level_to_count] += 1
                         return
                     elif var_name in self.framework_loggers:
-                        self.framework_calls[attr_name] += 1
+                        self.framework_calls[level_to_count] += 1
                         return
                 
                 # Check attribute access: self.logger.*
@@ -274,13 +310,13 @@ class LoggingASTVisitor(ast.NodeVisitor):
                         attr_name_attr = node.func.value.attr
                         logger_type = self.attribute_loggers.get((obj_name, attr_name_attr))
                         if logger_type == "stdlib":
-                            self.stdlib_calls[attr_name] += 1
+                            self.stdlib_calls[level_to_count] += 1
                             return
                         elif logger_type == "structlog":
-                            self.structlog_calls[attr_name] += 1
+                            self.structlog_calls[level_to_count] += 1
                             return
                         elif logger_type == "framework":
-                            self.framework_calls[attr_name] += 1
+                            self.framework_calls[level_to_count] += 1
                             return
                 
                 # Generic logger call (unknown logger variable) - track variable name
@@ -292,7 +328,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
                         var_name = f"{node.func.value.value.id}.{node.func.value.attr}"
                         self.unknown_logger_vars[var_name] += 1
                 
-                self.generic_calls[attr_name] += 1
+                self.generic_calls[level_to_count] += 1
         
         # Config calls with context detection
         if isinstance(node.func, ast.Attribute):
@@ -323,23 +359,32 @@ class LoggingASTVisitor(ast.NodeVisitor):
     
     def _is_config_guarded(self, node: ast.Call) -> bool:
         """Check if config call is guarded (inside function or if __name__ == '__main__')."""
+        # Walk up the AST to find if we're inside a function/class or if __name__ == "__main__"
+        parent = getattr(node, 'parent', None)
+        in_function = False
+        in_class = False
+        in_if_main = False
+        
+        # Simple heuristic: check if line is indented
         line_no = node.lineno - 1  # Convert to 0-indexed
         if line_no >= len(self.lines):
             return False
         
-        # Check if line is indented (inside a function/class)
         line = self.lines[line_no]
-        if line.strip() and not line.startswith((' ', '\t')):
-            # Not indented - check if it's in if __name__ == "__main__" block
-            # Look backwards for if __name__ == "__main__"
-            for i in range(max(0, line_no - 10), line_no):
-                check_line = self.lines[i].strip()
-                if 'if __name__' in check_line and '__main__' in check_line:
-                    return True
-            return False  # At module level, not guarded
-        else:
-            # Indented - likely inside a function
-            return True
+        is_indented = line.strip() and (line.startswith(' ') or line.startswith('\t'))
+        
+        # Check if we're in an if __name__ == "__main__" block
+        # Look backwards for if __name__ == "__main__"
+        for i in range(max(0, line_no - 20), line_no):
+            check_line = self.lines[i].strip()
+            if 'if __name__' in check_line and '__main__' in check_line:
+                in_if_main = True
+                break
+        
+        # If indented, likely inside function/class (guarded)
+        # If not indented but in if __name__ == "__main__", also guarded
+        # Otherwise, it's at module level (import-time, not guarded)
+        return is_indented or in_if_main
     
     def visit_ExceptHandler(self, node):
         """Track bare except blocks."""
@@ -351,20 +396,20 @@ class LoggingASTVisitor(ast.NodeVisitor):
         """Check for JSON formatting indicators in config locations and file content."""
         json_indicators = [
             "JSONFormatter", "pythonjsonlogger", "jsonlogger", 
-            "JSONRenderer", "orjson"
+            "JSONRenderer", "orjson", "JSONRenderer"
         ]
         
-        # Check config call lines and surrounding context (5 lines before/after)
+        # Check config call lines and surrounding context (10 lines before/after)
         for config_tuple in self.config_calls:
             line_no = config_tuple[0]  # (line_no, config_type, is_guarded)
-            start_line = max(0, line_no - 6)  # 5 lines before (0-indexed)
-            end_line = min(len(self.lines), line_no + 5)  # 5 lines after
+            start_line = max(0, line_no - 11)  # 10 lines before (0-indexed)
+            end_line = min(len(self.lines), line_no + 10)  # 10 lines after
             
             for i in range(start_line, end_line):
                 if i < len(self.lines):
                     line = self.lines[i]
                     for indicator in json_indicators:
-                        if indicator in line:
+                        if indicator.lower() in line.lower():
                             self.json_formatting_indicators.append(indicator)
                             break
         
@@ -375,7 +420,13 @@ class LoggingASTVisitor(ast.NodeVisitor):
             if "jsonrenderer" in file_content_lower or "json_renderer" in file_content_lower:
                 # Look for structlog.configure or processor assignments
                 if "structlog.configure" in self.file_content or "processors" in file_content_lower:
-                    self.json_formatting_indicators.append("JSONRenderer")
+                    if "JSONRenderer" not in self.json_formatting_indicators:
+                        self.json_formatting_indicators.append("JSONRenderer")
+        
+        # Check for pythonjsonlogger / JSONFormatter imports
+        if "JSONFormatter" in self.file_content or "pythonjsonlogger" in self.file_content.lower():
+            if "JSONFormatter" not in self.json_formatting_indicators:
+                self.json_formatting_indicators.append("JSONFormatter")
 
 
 class RepoScanner:
@@ -392,7 +443,8 @@ class RepoScanner:
             "python_files_skipped": {
                 "ignored_path": [],
                 "decode_error": [],
-                "read_error": []
+                "read_error": [],
+                "parse_error": []
             }
         }
         self.logging_stats = {
@@ -401,7 +453,11 @@ class RepoScanner:
             "framework_logging": {"calls": defaultdict(int)},  # Framework logger calls
             "generic_logging": {"calls": defaultdict(int)},
             "print_calls": 0,
+            "print_calls_in_scripts": 0,
+            "print_calls_outside_scripts": 0,
         }
+        self.total_lines = 0
+        self.non_empty_lines = 0
         self.file_logging_counts = defaultdict(int)
         self.file_print_counts = defaultdict(int)
         self.file_has_both_print_and_logger = []  # Files with both print() and logger calls
@@ -441,18 +497,25 @@ class RepoScanner:
         """Analyze a Python file using AST."""
         rel_path = str(filepath.relative_to(self.root))
         
+        # Count LOC (total lines and non-empty lines)
+        total_lines = len(content.splitlines())
+        non_empty_lines = sum(1 for line in content.splitlines() if line.strip())
+        
         try:
             tree = ast.parse(content, filename=str(filepath))
-        except SyntaxError:
-            # Skip files with syntax errors
+        except (SyntaxError, ValueError) as e:
+            # Skip files with syntax/parse errors
+            self.scan_coverage["python_files_skipped"]["parse_error"].append(rel_path)
             return {
                 "path": rel_path,
                 "logging_calls": 0,
                 "print_calls": 0,
-                "error": "syntax_error"
+                "total_lines": total_lines,
+                "non_empty_lines": non_empty_lines,
+                "error": "parse_error"
             }
         
-        visitor = LoggingASTVisitor(content)
+        visitor = LoggingASTVisitor(content, rel_path)
         visitor.visit(tree)
         visitor.check_json_formatting()
         
@@ -470,6 +533,8 @@ class RepoScanner:
         self.logging_stats["stdlib_logging"]["get_logger"] += visitor.stdlib_getlogger_calls
         self.logging_stats["structlog"]["get_logger"] += visitor.structlog_getlogger_calls
         self.logging_stats["print_calls"] += visitor.print_calls
+        self.logging_stats["print_calls_in_scripts"] = self.logging_stats.get("print_calls_in_scripts", 0) + visitor.print_calls_in_scripts
+        self.logging_stats["print_calls_outside_scripts"] = self.logging_stats.get("print_calls_outside_scripts", 0) + visitor.print_calls_outside_scripts
         
         # Count calls by level
         for level, count in visitor.stdlib_calls.items():
@@ -524,7 +589,9 @@ class RepoScanner:
         return {
             "path": rel_path,
             "logging_calls": total_logging_calls,
-            "print_calls": visitor.print_calls
+            "print_calls": visitor.print_calls,
+            "total_lines": total_lines,
+            "non_empty_lines": non_empty_lines
         }
     
     def scan(self):
@@ -583,6 +650,12 @@ class RepoScanner:
                     # Analyze with AST
                     result = self.analyze_python_file(filepath, content)
                     
+                    # Track LOC
+                    if "total_lines" in result:
+                        self.total_lines += result["total_lines"]
+                    if "non_empty_lines" in result:
+                        self.non_empty_lines += result["non_empty_lines"]
+                    
                     # Track files with both print() and logger calls
                     if result["print_calls"] > 0 and result["logging_calls"] > 0:
                         self.file_has_both_print_and_logger.append({
@@ -621,7 +694,9 @@ class RepoScanner:
             "meta": {
                 "repo_path": str(self.root),
                 "scan_timestamp": self.scan_timestamp,
-                "exclusions": sorted(self.ignore_dirs)
+                "exclusions": sorted(self.ignore_dirs),
+                "total_lines": self.total_lines,
+                "non_empty_lines": self.non_empty_lines
             },
             "scan_coverage": {
                 "python_files_discovered": self.scan_coverage["python_files_discovered"],
@@ -629,12 +704,14 @@ class RepoScanner:
                 "python_files_skipped": {
                     "ignored_path": len(self.scan_coverage["python_files_skipped"]["ignored_path"]),
                     "decode_error": len(self.scan_coverage["python_files_skipped"]["decode_error"]),
-                    "read_error": len(self.scan_coverage["python_files_skipped"]["read_error"])
+                    "read_error": len(self.scan_coverage["python_files_skipped"]["read_error"]),
+                    "parse_error": len(self.scan_coverage["python_files_skipped"]["parse_error"])
                 },
                 "skipped_files_detail": {
                     "ignored_path": self.scan_coverage["python_files_skipped"]["ignored_path"][:20],  # Limit for report
                     "decode_error": self.scan_coverage["python_files_skipped"]["decode_error"][:20],
-                    "read_error": self.scan_coverage["python_files_skipped"]["read_error"][:20]
+                    "read_error": self.scan_coverage["python_files_skipped"]["read_error"][:20],
+                    "parse_error": self.scan_coverage["python_files_skipped"]["parse_error"][:20]
                 }
             },
             "logging_usage": {
@@ -660,6 +737,8 @@ class RepoScanner:
                     "method_calls": dict(self.logging_stats["generic_logging"]["calls"])
                 },
                 "print_calls": self.logging_stats["print_calls"],
+                "print_calls_in_scripts": self.logging_stats.get("print_calls_in_scripts", 0),
+                "print_calls_outside_scripts": self.logging_stats.get("print_calls_outside_scripts", 0),
                 "top_logging_files": [{"file": f, "count": c} for f, c in top_logging_files],
                 "top_print_files": [{"file": f, "count": c} for f, c in top_print_files]
             },
@@ -712,6 +791,12 @@ class RepoScanner:
         lines.append(f"**Scan Timestamp:** {data['meta']['scan_timestamp']}")
         lines.append("")
         
+        # LOC reporting
+        if "total_lines" in data["meta"]:
+            lines.append("**Total Lines (Physical):** " + str(data["meta"]["total_lines"]))
+            lines.append("**Non-Empty Lines:** " + str(data["meta"]["non_empty_lines"]))
+            lines.append("")
+        
         # Scan Coverage
         coverage = data["scan_coverage"]
         lines.append("## Scan Coverage")
@@ -723,6 +808,7 @@ class RepoScanner:
         lines.append(f"| Python files skipped (ignored path) | {coverage['python_files_skipped']['ignored_path']} |")
         lines.append(f"| Python files skipped (decode error) | {coverage['python_files_skipped']['decode_error']} |")
         lines.append(f"| Python files skipped (read error) | {coverage['python_files_skipped']['read_error']} |")
+        lines.append(f"| Python files skipped (parse error) | {coverage['python_files_skipped'].get('parse_error', 0)} |")
         lines.append("")
         
         # Show ignored directories
@@ -755,6 +841,14 @@ class RepoScanner:
                 lines.append(f"- `{f}`")
             if len(skipped_detail["read_error"]) > 5:
                 lines.append(f"- ... and {len(skipped_detail['read_error']) - 5} more")
+            lines.append("")
+        
+        if skipped_detail.get("parse_error"):
+            lines.append("**Sample skipped files (parse error):**")
+            for f in skipped_detail["parse_error"][:5]:
+                lines.append(f"- `{f}`")
+            if len(skipped_detail["parse_error"]) > 5:
+                lines.append(f"- ... and {len(skipped_detail['parse_error']) - 5} more")
             lines.append("")
         
         # Logging Usage Summary
@@ -796,24 +890,27 @@ class RepoScanner:
             lines.append("*Note: Framework logger calls (uvicorn, gunicorn, Flask app.logger, FastAPI logger).*")
             lines.append("")
         
-        # Generic logger calls
+        # Generic/Unknown logger calls
         generic_data = data["logging_usage"]["generic_logging"]
-        if sum(generic_data["method_calls"].values()) > 0:
-            lines.append("### Generic Logger Calls (Unknown Origin)")
+        total_generic = sum(generic_data["method_calls"].values())
+        if total_generic > 0:
+            lines.append("### Generic/Unknown Logger Calls")
             lines.append("")
             lines.append("| Metric | Count |")
             lines.append("|--------|-------|")
-            lines.append(f"| Total method calls | {sum(generic_data['method_calls'].values())} |")
+            lines.append(f"| Total method calls | {total_generic} |")
             lines.append("")
             lines.append("*Note: Logger calls where the logger variable source could not be determined.*")
             lines.append("")
         
-        # Print statements
-        lines.append("### Non-Logging Output")
+        # Print statements - split by scripts/
+        lines.append("### Print Calls")
         lines.append("")
-        lines.append("| Type | Count |")
-        lines.append("|------|-------|")
-        lines.append(f"| `print()` calls | {data['logging_usage']['print_calls']} |")
+        lines.append("| Location | Count |")
+        lines.append("|----------|-------|")
+        lines.append(f"| In `scripts/` directories | {data['logging_usage'].get('print_calls_in_scripts', 0)} |")
+        lines.append(f"| Outside `scripts/` | {data['logging_usage'].get('print_calls_outside_scripts', 0)} |")
+        lines.append(f"| **Total** | {data['logging_usage']['print_calls']} |")
         lines.append("")
         
         # Top Offenders
@@ -843,12 +940,16 @@ class RepoScanner:
         # Log Level Distribution
         lines.append("## Log Level Distribution")
         lines.append("")
+        total_logger_calls = sum(data["log_levels"].values())
         lines.append("| Level | Count |")
         lines.append("|-------|-------|")
         for level in ["debug", "info", "warning", "error", "critical", "exception"]:
             count = data["log_levels"].get(level, 0)
             if count > 0:
                 lines.append(f"| {level.upper()} | {count} |")
+        lines.append(f"| **Total** | **{total_logger_calls}** |")
+        lines.append("")
+        lines.append(f"*Note: Total logger calls = {total_logger_calls}. Level distribution sums must match this total.*")
         lines.append("")
         
         # Logger Configuration
@@ -993,13 +1094,21 @@ class RepoScanner:
 
 def main():
     """Main entry point."""
+    # Determine default root (script_dir/../..)
+    script_path = Path(__file__).resolve()
+    script_dir = script_path.parent
+    default_root = (script_dir / ".." / "..").resolve()
+    
     parser = argparse.ArgumentParser(
         description="Logging audit tool for Python repositories (STRICTLY READ-ONLY)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Scan ArrowSystems backend (output to stdout):
-  python tools/dev/repo_scan.py --root C:/Users/ethan/ArrowSystems/backend
+  # Scan default repo (C:\\LogExplainer_clean):
+  python tools/dev/repo_scan.py
+  
+  # Scan specific directory (output to stdout):
+  python tools/dev/repo_scan.py --root /path/to/repo
   
   # Save output to file (redirect stdout):
   python tools/dev/repo_scan.py --root /path/to/repo > report.md
@@ -1014,8 +1123,8 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
     parser.add_argument(
         "--root",
         type=str,
-        required=True,
-        help="Root directory to scan (REQUIRED)"
+        default=None,
+        help=f"Root directory to scan (default: {default_root})"
     )
     parser.add_argument(
         "--format",
@@ -1028,7 +1137,13 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         type=str,
         default=None,
         help="Output file path (optional). If not provided, output goes to stdout. "
-             "MUST be outside the scanned repository root."
+             "MUST be outside the scanned repository root unless --allow-write-in-repo is used."
+    )
+    parser.add_argument(
+        "--allow-write-in-repo",
+        action="store_true",
+        default=False,
+        help="Allow writing output file inside the repository root (not recommended)"
     )
     parser.add_argument(
         "--include-cache-metrics",
@@ -1039,8 +1154,8 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
     
     args = parser.parse_args()
     
-    # Resolve root directory
-    root = Path(args.root).resolve()
+    # Resolve root directory (use default if not provided)
+    root = Path(args.root).resolve() if args.root else default_root
     
     if not root.exists():
         print(f"Error: Root directory does not exist: {root}", file=sys.stderr)
@@ -1052,10 +1167,12 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         try:
             # Check if output path is inside or equal to repo root
             out_path.relative_to(root)
-            print(f"Error: Output path '{out_path}' is inside the scanned repository root '{root}'.", file=sys.stderr)
-            print("This script is STRICTLY READ-ONLY and cannot write files inside the repository.", file=sys.stderr)
-            print("Please specify an output path outside the repository root.", file=sys.stderr)
-            return 1
+            # If inside repo and --allow-write-in-repo is not set, error
+            if not args.allow_write_in_repo:
+                print(f"Error: Output path '{out_path}' is inside the scanned repository root '{root}'.", file=sys.stderr)
+                print("This script is STRICTLY READ-ONLY and cannot write files inside the repository.", file=sys.stderr)
+                print("Please specify an output path outside the repository root, or use --allow-write-in-repo flag.", file=sys.stderr)
+                return 1
         except ValueError:
             # Good - output path is outside repo root
             pass
