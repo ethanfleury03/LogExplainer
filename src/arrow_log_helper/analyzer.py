@@ -158,7 +158,7 @@ def analyze(text, settings=None, progress_cb=None, defaults_module=None):
         merged["start_line"] = enc.get("start_line")
         merged["end_line"] = enc.get("end_line")
         merged["signature"] = signature
-        if signature is None and enc.get("enclosure_type") == "none":
+        if signature is None and enc.get("enclosure_type") in ("none", "window"):
             merged["context_preview"] = enc.get("block")
         else:
             merged["context_preview"] = None

@@ -70,10 +70,13 @@ def _compute_enclosure_display_name(enclosure_type, name, signature):
     """Format enclosure as 'def name(args)' or 'class Name' or '<none>'."""
     if signature:
         return signature
-    if enclosure_type == "def" and name:
-        return "def %s(...)" % (name,)
+    if enclosure_type in ("def", "async_def") and name:
+        prefix = "async def " if enclosure_type == "async_def" else "def "
+        return "%s%s(...)" % (prefix, name,)
     if enclosure_type == "class" and name:
         return "class %s" % (name,)
+    if enclosure_type == "window":
+        return "<context window>"
     return "<none>"
 
 
