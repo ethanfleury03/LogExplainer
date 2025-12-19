@@ -5,6 +5,12 @@ STRICTLY READ-ONLY production logging audit tool for Python repositories.
 Scans production code (excludes tests) for logging patterns and generates
 a human-readable Markdown report to STDOUT only.
 
+Python 2.7.5 Compatibility:
+- Uses only Python 2.7 AST node types (ast.Str, ast.Num, ast.Name, etc.)
+- No Python 3-only nodes (ast.Constant, ast.NameConstant, ast.JoinedStr)
+- Handles unicode/str safely for Python 2.7
+- All aggregation code paths accept (template, kind, level, file_path, line_no) format
+
 Features:
 - Detects stdlib logging, structlog, and generic logger usage (production code only)
 - Quantifies error logging (total calls + unique message templates)
@@ -479,11 +485,20 @@ class LoggingASTVisitor(ast.NodeVisitor):
             template = first_arg.s
             kind = "static"
         # Translation wrapper: _("msg") or gettext("msg") or ugettext("msg")
+        # Also handle nested: _("%s" % x) -> dynamic
         elif isinstance(first_arg, ast.Call) and isinstance(first_arg.func, ast.Name):
             if first_arg.func.id in ("_", "gettext", "ugettext") and first_arg.args:
+                # Check if first arg is a string literal
                 if isinstance(first_arg.args[0], ast.Str):
                     template = first_arg.args[0].s
                     kind = "static"
+                # Check if it's a % formatting: _("%s" % x)
+                elif isinstance(first_arg.args[0], ast.BinOp) and isinstance(first_arg.args[0].op, ast.Mod):
+                    if isinstance(first_arg.args[0].left, ast.Str):
+                        template = first_arg.args[0].left.s
+                        kind = "dynamic"  # Has dynamic part (% x)
+                    else:
+                        return ("<dynamic>", "dynamic")
                 else:
                     return ("<dynamic>", "dynamic")
             else:
@@ -848,11 +863,14 @@ class RepoScanner:
         
         lines = content.splitlines()
         for line_num, line in enumerate(lines, 1):
-            # Count print calls (both print() and print statements)
+            # Count print calls (regex fallback only - AST handles separately)
+            # Count print() function calls
             print_matches = print_pattern.findall(line)
             print_calls += len(print_matches)
-            # Also count Python 2 print statements: print "x"
-            if re.search(r'\bprint\s+["\']', line):
+            # Count Python 2 print statements: print "x" or print >>f, "x"
+            # Pattern: print followed by optional >>target, then string literal
+            # Only count if not already matched as print()
+            if not print_matches and re.search(r'\bprint\s+(>>\s*\w+\s*,\s*)?["\']', line):
                 print_calls += 1
             
             # Find logger calls
@@ -1783,9 +1801,16 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
     
     # Write to stdout with UTF-8 encoding (ONLY output method - no files)
     # Python 2.7: handle unicode output properly
+    # Note: unicode is a built-in type in Python 2.7, not available in Python 3
     try:
         # Python 2.7: encode unicode to bytes for stdout
-        if isinstance(output, unicode):
+        # Check for unicode type (Python 2.7 only)
+        try:
+            unicode_type = unicode  # Python 2.7
+        except NameError:
+            unicode_type = str  # Python 3 (shouldn't happen, but safe)
+        
+        if isinstance(output, unicode_type):
             sys.stdout.write(output.encode("utf-8", errors="replace"))
         else:
             sys.stdout.write(output)
@@ -1796,7 +1821,11 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
             print(output)
         except UnicodeEncodeError:
             # Last resort: encode to ASCII with replacement
-            if isinstance(output, unicode):
+            try:
+                unicode_type = unicode  # Python 2.7
+            except NameError:
+                unicode_type = str  # Python 3
+            if isinstance(output, unicode_type):
                 print(output.encode("ascii", errors="replace"))
             else:
                 print(output)
