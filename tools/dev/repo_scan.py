@@ -78,6 +78,7 @@ class LoggingASTVisitor(ast.NodeVisitor):
         
         # Unknown logger variable tracking (for diagnostics)
         self.unknown_logger_vars = defaultdict(int)  # var_name -> call_count
+        self.unknown_logger_var_files = defaultdict(set)  # var_name -> set of files
         
         # Counts
         self.stdlib_imports = 0
@@ -221,12 +222,22 @@ class LoggingASTVisitor(ast.NodeVisitor):
                         elif logger_type == "framework":
                             self.framework_loggers.add(target.id)
                     
-                    # Track attribute assignments: self.logger = ...
+                    # Track attribute assignments: self.logger = ..., self._log = ..., self.foo._log = ...
                     elif isinstance(target, ast.Attribute):
-                        if isinstance(target.value, ast.Name):
-                            obj_name = target.value.id
-                            attr_name = target.attr
-                            self.attribute_loggers[(obj_name, attr_name)] = logger_type
+                        # Handle nested attributes: self.foo._log -> extract final attr name
+                        attr_chain = []
+                        current = target
+                        while isinstance(current, ast.Attribute):
+                            attr_chain.insert(0, current.attr)
+                            current = current.value
+                        
+                        # If base is 'self' or a simple name, track it
+                        if isinstance(current, ast.Name):
+                            obj_name = current.id
+                            # Store with final attribute name (e.g., "_log", "log", "_logger")
+                            final_attr = attr_chain[-1] if attr_chain else None
+                            if final_attr:
+                                self.attribute_loggers[(obj_name, final_attr)] = logger_type
         
         self.generic_visit(node)
     
@@ -311,30 +322,44 @@ class LoggingASTVisitor(ast.NodeVisitor):
                         self.framework_calls[level_to_count] += 1
                         return
                 
-                # Check attribute access: self.logger.*
+                # Check attribute access: self.logger.*, self._log.*, self.foo._log.*
                 if isinstance(node.func.value, ast.Attribute):
-                    if isinstance(node.func.value.value, ast.Name):
-                        obj_name = node.func.value.value.id
-                        attr_name_attr = node.func.value.attr
-                        logger_type = self.attribute_loggers.get((obj_name, attr_name_attr))
-                        if logger_type == "stdlib":
-                            self.stdlib_calls[level_to_count] += 1
-                            return
-                        elif logger_type == "structlog":
-                            self.structlog_calls[level_to_count] += 1
-                            return
-                        elif logger_type == "framework":
-                            self.framework_calls[level_to_count] += 1
-                            return
+                    # Extract attribute chain (e.g., self.foo._log -> ["self", "foo", "_log"])
+                    attr_chain = []
+                    current = node.func.value
+                    while isinstance(current, ast.Attribute):
+                        attr_chain.insert(0, current.attr)
+                        current = current.value
+                    
+                    # If base is a Name (like 'self'), resolve the final attribute
+                    if isinstance(current, ast.Name):
+                        obj_name = current.id
+                        final_attr = attr_chain[-1] if attr_chain else None
+                        if final_attr:
+                            logger_type = self.attribute_loggers.get((obj_name, final_attr))
+                            if logger_type == "stdlib":
+                                self.stdlib_calls[level_to_count] += 1
+                                return
+                            elif logger_type == "structlog":
+                                self.structlog_calls[level_to_count] += 1
+                                return
+                            elif logger_type == "framework":
+                                self.framework_calls[level_to_count] += 1
+                                return
                 
-                # Generic logger call (unknown logger variable) - track variable name
+                # Generic logger call (unknown logger variable) - track variable name and file
                 if isinstance(node.func.value, ast.Name):
-                    self.unknown_logger_vars[node.func.value.id] += 1
+                    var_name = node.func.value.id
+                    self.unknown_logger_vars[var_name] += 1
+                    if self.file_path:
+                        self.unknown_logger_var_files[var_name].add(self.file_path)
                 elif isinstance(node.func.value, ast.Attribute):
-                    # Track attribute access patterns
+                    # Track attribute access patterns (e.g., self._log)
                     if isinstance(node.func.value.value, ast.Name):
                         var_name = "{}.{}".format(node.func.value.value.id, node.func.value.attr)
                         self.unknown_logger_vars[var_name] += 1
+                        if self.file_path:
+                            self.unknown_logger_var_files[var_name].add(self.file_path)
                 
                 self.generic_calls[level_to_count] += 1
         
@@ -408,9 +433,21 @@ class LoggingASTVisitor(ast.NodeVisitor):
         first_arg = node.args[0]
         
         # String literal (Python 2.7: use ast.Str)
+        # This covers printf-style: logger.error("Failed %s", x) -> template = "Failed %s"
         if isinstance(first_arg, ast.Str):
             template = first_arg.s
-        # Note: f-strings (ast.JoinedStr) don't exist in Python 2.7, so skip that check
+        # % formatting: "x %s" % value -> template = "x %s"
+        elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, ast.Mod):
+            if isinstance(first_arg.left, ast.Str):
+                template = first_arg.left.s
+            else:
+                return "<dynamic>"
+        # .format() calls: "x {}".format(value) -> template = "x {}"
+        elif isinstance(first_arg, ast.Call) and isinstance(first_arg.func, ast.Attribute):
+            if first_arg.func.attr == "format" and isinstance(first_arg.func.value, ast.Str):
+                template = first_arg.func.value.s
+            else:
+                return "<dynamic>"
         # String concatenation (BinOp with Add)
         elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, ast.Add):
             # Try to extract literals, but mark as dynamic if complex
@@ -424,7 +461,8 @@ class LoggingASTVisitor(ast.NodeVisitor):
             except:
                 return "<dynamic>"
         else:
-            return "<dynamic>"
+            # No extractable template
+            return "<unknown>"
         
         # Normalize whitespace (collapse runs of spaces)
         template = re.sub(r'\s+', ' ', template.strip())
@@ -486,6 +524,8 @@ class RepoScanner:
         self.scan_coverage = {
             "python_files_discovered": 0,
             "python_files_scanned": 0,
+            "python_files_scanned_ast": 0,  # Files successfully parsed with AST
+            "python_files_scanned_regex": 0,  # Files scanned with regex fallback
             "python_files_skipped": {
                 "test_file": [],  # Test files (test_*.py, *_test.py, in test dirs)
                 "self_file": [],  # Scanner script itself
@@ -564,8 +604,9 @@ class RepoScanner:
         # Split path into parts
         path_parts = [p.lower() for p in rel_path.replace("\\", "/").split("/") if p]
         
-        # Check for test directories (exact matches in path parts)
-        test_dir_patterns = {"tests", "test", "__tests__", "fixtures", "testdata", "sample_repo"}
+        # Check for test directories and non-production dirs (exact matches in path parts)
+        test_dir_patterns = {"tests", "test", "__tests__", "fixtures", "testdata", "sample_repo", 
+                             "test_rigs", "rigs", "fixture"}
         if any(part in test_dir_patterns for part in path_parts):
             return True
         
@@ -623,20 +664,15 @@ class RepoScanner:
         try:
             tree = ast.parse(content, filename=filepath)
         except (SyntaxError, ValueError) as e:
-            # Skip files with syntax/parse errors
-            self.scan_coverage["python_files_skipped"]["parse_error"].append(rel_path)
-            return {
-                "path": rel_path,
-                "logging_calls": 0,
-                "print_calls": 0,
-                "total_lines": total_lines,
-                "non_empty_lines": non_empty_lines,
-                "error": "parse_error"
-            }
+            # Try regex fallback for parse errors (Python 3 syntax in Python 2.7 environment)
+            return self._analyze_with_regex_fallback(filepath, content, rel_path, total_lines, non_empty_lines)
         
         visitor = LoggingASTVisitor(content, rel_path)
         visitor.visit(tree)
         visitor.check_json_formatting()
+        
+        # Mark as AST-scanned
+        self.scan_coverage["python_files_scanned_ast"] += 1
         
         # Aggregate counts (including framework calls)
         total_logging_calls = (
@@ -720,6 +756,126 @@ class RepoScanner:
             "total_lines": total_lines,
             "non_empty_lines": non_empty_lines
         }
+    
+    def _analyze_with_regex_fallback(self, filepath, content, rel_path, total_lines, non_empty_lines):
+        """Regex-based fallback for files that fail to parse with AST (Python 3 syntax in Py2.7)."""
+        # Mark as regex-scanned
+        self.scan_coverage["python_files_scanned_regex"] += 1
+        
+        # Regex patterns for logger calls
+        logger_pattern = re.compile(r'\b([A-Za-z_][A-Za-z0-9_\.]*?)\.(debug|info|warning|error|critical|exception)\s*\(')
+        print_pattern = re.compile(r'\bprint\s*\(')
+        
+        logging_calls = 0
+        print_calls = 0
+        error_templates_found = []
+        
+        lines = content.splitlines()
+        for line_num, line in enumerate(lines, 1):
+            # Count print calls
+            print_matches = print_pattern.findall(line)
+            print_calls += len(print_matches)
+            
+            # Find logger calls
+            for match in logger_pattern.finditer(line):
+                logger_base, level = match.groups()
+                logging_calls += 1
+                
+                # Extract error templates for error-like calls
+                if level in ("error", "exception", "critical"):
+                    # Try to extract first string literal from the call
+                    call_start = match.end()
+                    paren_content = self._extract_call_content(line[call_start:])
+                    if paren_content:
+                        template = self._extract_template_from_string(paren_content)
+                        if template:
+                            error_templates_found.append((template, level, line_num))
+        
+        # Update global stats (classify as unknown/generic)
+        level_counts = defaultdict(int)
+        for match in logger_pattern.finditer(content):
+            _, level = match.groups()
+            if level == "exception":
+                level_counts["exception"] += 1
+            else:
+                level_counts[level] += 1
+        
+        for level, count in level_counts.items():
+            self.logging_stats["generic_logging"]["calls"][level] += count
+            self.level_counts[level] += count
+        
+        # Track error templates
+        for template, level, line_no in error_templates_found:
+            self.error_templates.append((template, level, rel_path, line_no))
+            if template not in ("<dynamic>", "<unknown>"):
+                self.error_template_counts[template] += 1
+                self.error_template_files[template].add(rel_path)
+        
+        # Update print counts
+        self.logging_stats["print_calls"] += print_calls
+        if "\\scripts\\" in rel_path.lower() or "/scripts/" in rel_path.lower():
+            self.logging_stats["print_calls_in_scripts"] += print_calls
+        else:
+            self.logging_stats["print_calls_outside_scripts"] += print_calls
+        
+        # Track per-file counts
+        if logging_calls > 0:
+            self.file_logging_counts[rel_path] = logging_calls
+        if print_calls > 0:
+            self.file_print_counts[rel_path] = print_calls
+        
+        return {
+            "path": rel_path,
+            "logging_calls": logging_calls,
+            "print_calls": print_calls,
+            "total_lines": total_lines,
+            "non_empty_lines": non_empty_lines,
+            "error": "regex_fallback"
+        }
+    
+    def _extract_call_content(self, text):
+        """Extract content inside first function call parentheses."""
+        depth = 0
+        start = -1
+        for i, char in enumerate(text):
+            if char == '(':
+                if depth == 0:
+                    start = i + 1
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    return text[start:i].strip()
+        return ""
+    
+    def _extract_template_from_string(self, content):
+        """Extract template from string content (handles quotes, %, .format, f-strings)."""
+        # Remove leading/trailing whitespace
+        content = content.strip()
+        
+        # Try to find first string literal (single or double quotes)
+        # Pattern: "..." or '...' possibly with f/F prefix
+        string_pattern = re.compile(r'[fF]?["\']([^"\']*)["\']')
+        match = string_pattern.match(content)
+        if match:
+            template = match.group(1)
+            # Normalize f-string placeholders {expr} to <expr>
+            template = re.sub(r'\{[^}]*\}', '<expr>', template)
+            return template
+        
+        # Try % formatting: "msg %s" % value
+        mod_pattern = re.compile(r'["\']([^"\']*)["\']\s*%')
+        match = mod_pattern.match(content)
+        if match:
+            return match.group(1)
+        
+        # Try .format(): "msg {}".format(...)
+        format_pattern = re.compile(r'["\']([^"\']*)["\']\s*\.format\s*\(')
+        match = format_pattern.match(content)
+        if match:
+            return match.group(1)
+        
+        return "<unknown>"
     
     def scan(self):
         """Perform the full repository scan."""
@@ -867,6 +1023,8 @@ class RepoScanner:
             "scan_coverage": {
                 "python_files_discovered": self.scan_coverage["python_files_discovered"],
                 "python_files_scanned": self.scan_coverage["python_files_scanned"],
+                "python_files_scanned_ast": self.scan_coverage.get("python_files_scanned_ast", 0),
+                "python_files_scanned_regex": self.scan_coverage.get("python_files_scanned_regex", 0),
                 "python_files_skipped": {
                     "test_file": len(self.scan_coverage["python_files_skipped"]["test_file"]),
                     "self_file": len(self.scan_coverage["python_files_skipped"]["self_file"]),
@@ -1022,6 +1180,9 @@ class RepoScanner:
         lines.append("|--------|-------|")
         lines.append("| Python files discovered | {} |".format(coverage['python_files_discovered']))
         lines.append("| Python files successfully scanned | {} |".format(coverage['python_files_scanned']))
+        if coverage.get('python_files_scanned_ast', 0) > 0 or coverage.get('python_files_scanned_regex', 0) > 0:
+            lines.append("|   - Scanned with AST | {} |".format(coverage.get('python_files_scanned_ast', 0)))
+            lines.append("|   - Scanned with regex fallback | {} |".format(coverage.get('python_files_scanned_regex', 0)))
         lines.append("| Python files skipped (test files) | {} |".format(coverage['python_files_skipped'].get('test_file', 0)))
         lines.append("| Python files skipped (scanner script) | {} |".format(coverage['python_files_skipped'].get('self_file', 0)))
         lines.append("| Python files skipped (ignored path) | {} |".format(coverage['python_files_skipped'].get('ignored_path', 0)))
@@ -1288,6 +1449,19 @@ class RepoScanner:
                 lines.append("This indicates a counting bug. Some files may be partially counted.")
                 lines.append("Please report this issue.")
                 lines.append("")
+        
+        # Additional consistency checks
+        if "error_logging" in data:
+            error_data = data["error_logging"]
+            error_sum = error_data.get("error_calls", 0) + error_data.get("exception_calls", 0) + error_data.get("critical_calls", 0)
+            if error_sum != error_data.get("total_error_calls", 0):
+                lines.append("## ⚠️ CONSISTENCY WARNING")
+                lines.append("")
+                lines.append("Error-like call breakdown does not match total:")
+                lines.append("- ERROR + EXCEPTION + CRITICAL = **{}**".format(error_sum))
+                lines.append("- Reported total = **{}**".format(error_data.get("total_error_calls", 0)))
+                lines.append("")
+        
         lines.append("")
         
         # Logger Configuration
