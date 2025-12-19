@@ -272,8 +272,8 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 # Check for exc_info=True in keyword arguments
                 for kw in node.keywords:
                     if kw.arg == "exc_info":
-                        # Handle ast.NameConstant (Python 2.7/3.x compatibility)
-                        if isinstance(kw.value, ast.NameConstant) and kw.value.value is True:
+                        # Handle boolean values (Python 2.7: True/False/None are ast.Name nodes)
+                        if isinstance(kw.value, ast.Name) and kw.value.id == "True":
                             self.exc_info_calls += 1
                 
                 # Check if it's logging.info(...) - direct stdlib call
@@ -407,19 +407,10 @@ class LoggingASTVisitor(ast.NodeVisitor):
         
         first_arg = node.args[0]
         
-        # String literal (use ast.Str for Python 2.7 compatibility)
+        # String literal (Python 2.7: use ast.Str)
         if isinstance(first_arg, ast.Str):
             template = first_arg.s
-        # f-string (JoinedStr) - Python 3.6+ only, skip in Python 2.7
-        # Note: ast.JoinedStr doesn't exist in Python 2.7
-        elif hasattr(ast, 'JoinedStr') and isinstance(first_arg, ast.JoinedStr):
-            parts = []
-            for value in first_arg.values:
-                if isinstance(value, ast.Str):
-                    parts.append(value.s)
-                else:
-                    parts.append("{...}")
-            template = "".join(parts)
+        # Note: f-strings (ast.JoinedStr) don't exist in Python 2.7, so skip that check
         # String concatenation (BinOp with Add)
         elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, ast.Add):
             # Try to extract literals, but mark as dynamic if complex
@@ -1529,29 +1520,24 @@ Note: This script is STRICTLY READ-ONLY. It never writes, creates, modifies, or 
     output = scanner.format_markdown(report_data)
     
     # Write to stdout with UTF-8 encoding (ONLY output method - no files)
-    # Python 2.7 compatibility: handle unicode output properly
+    # Python 2.7: handle unicode output properly
     try:
-        if hasattr(sys.stdout, "reconfigure"):
-            # Python 3.7+ has reconfigure
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-            sys.stdout.write(output)
-        elif sys.version_info[0] >= 3:
-            # Python 3 without reconfigure
-            sys.stdout.write(output)
+        # Python 2.7: encode unicode to bytes for stdout
+        if isinstance(output, unicode):
+            sys.stdout.write(output.encode("utf-8", errors="replace"))
         else:
-            # Python 2.7: encode unicode to bytes for stdout
-            if isinstance(output, unicode):
-                sys.stdout.write(output.encode("utf-8", errors="replace"))
-            else:
-                sys.stdout.write(output)
+            sys.stdout.write(output)
         sys.stdout.flush()
-    except (UnicodeEncodeError, AttributeError, UnicodeDecodeError):
+    except (UnicodeEncodeError, UnicodeDecodeError):
         # Fallback: try to print directly (Python 2.7 will handle unicode if terminal supports it)
         try:
             print(output)
         except UnicodeEncodeError:
             # Last resort: encode to ASCII with replacement
-            print(output.encode("ascii", errors="replace"))
+            if isinstance(output, unicode):
+                print(output.encode("ascii", errors="replace"))
+            else:
+                print(output)
     
     return 0
 
