@@ -452,6 +452,7 @@ class RepoScanner:
             "structlog": {"imports": 0, "get_logger": 0, "calls": defaultdict(int)},
             "framework_logging": {"calls": defaultdict(int)},  # Framework logger calls
             "generic_logging": {"calls": defaultdict(int)},
+            "loguru": {"imports": 0, "get_logger": 0, "calls": defaultdict(int)},
             "print_calls": 0,
             "print_calls_in_scripts": 0,
             "print_calls_outside_scripts": 0,
@@ -530,6 +531,7 @@ class RepoScanner:
         # Update global stats
         self.logging_stats["stdlib_logging"]["imports"] += visitor.stdlib_imports
         self.logging_stats["structlog"]["imports"] += visitor.structlog_imports
+        self.logging_stats["loguru"]["imports"] += visitor.loguru_imports
         self.logging_stats["stdlib_logging"]["get_logger"] += visitor.stdlib_getlogger_calls
         self.logging_stats["structlog"]["get_logger"] += visitor.structlog_getlogger_calls
         self.logging_stats["print_calls"] += visitor.print_calls
@@ -1137,13 +1139,13 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         type=str,
         default=None,
         help="Output file path (optional). If not provided, output goes to stdout. "
-             "MUST be outside the scanned repository root unless --allow-write-in-repo is used."
+             "MUST be inside the scanned repository root (writing outside repo is not allowed)."
     )
     parser.add_argument(
-        "--allow-write-in-repo",
+        "--allow-write-outside-repo",
         action="store_true",
         default=False,
-        help="Allow writing output file inside the repository root (not recommended)"
+        help="Allow writing output file outside the repository root (not recommended)"
     )
     parser.add_argument(
         "--include-cache-metrics",
@@ -1161,21 +1163,20 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         print(f"Error: Root directory does not exist: {root}", file=sys.stderr)
         return 1
     
-    # Check if --out path is inside repo root (strict read-only enforcement)
+    # Check if --out path is outside repo root (prevent writing outside)
     if args.out:
         out_path = Path(args.out).resolve()
         try:
             # Check if output path is inside or equal to repo root
             out_path.relative_to(root)
-            # If inside repo and --allow-write-in-repo is not set, error
-            if not args.allow_write_in_repo:
-                print(f"Error: Output path '{out_path}' is inside the scanned repository root '{root}'.", file=sys.stderr)
-                print("This script is STRICTLY READ-ONLY and cannot write files inside the repository.", file=sys.stderr)
-                print("Please specify an output path outside the repository root, or use --allow-write-in-repo flag.", file=sys.stderr)
-                return 1
+            # Good - output path is inside repo root
         except ValueError:
-            # Good - output path is outside repo root
-            pass
+            # Output path is outside repo root
+            if not args.allow_write_outside_repo:
+                print(f"Error: Output path '{out_path}' is outside the scanned repository root '{root}'.", file=sys.stderr)
+                print("This script can only write files inside the repository root.", file=sys.stderr)
+                print("Please specify an output path inside the repository root, or use --allow-write-outside-repo flag.", file=sys.stderr)
+                return 1
     
     # Perform scan
     scanner = RepoScanner(str(root), include_cache_metrics=args.include_cache_metrics)
