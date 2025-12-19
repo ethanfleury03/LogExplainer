@@ -100,6 +100,9 @@ class LoggingASTVisitor(ast.NodeVisitor):
         self.traceback_calls = 0  # traceback.print_exc / format_exc
         self.bare_except_blocks = []  # List of (line_no, file_context)
         
+        # Error template tracking
+        self.error_templates = []  # List of (template, level, line_no) for error/exception/critical calls
+        
         # Config detection with context
         self.config_calls = []  # List of (line_no, config_type, is_guarded)
         self.json_formatting_indicators = []
@@ -260,6 +263,11 @@ class LoggingASTVisitor(ast.NodeVisitor):
                 else:
                     level_to_count = attr_name
                 
+                # Extract error template for error/exception/critical calls
+                if level_to_count in ("error", "exception", "critical"):
+                    template = self._extract_error_template(node)
+                    self.error_templates.append((template, level_to_count, line_no))
+                
                 # Check for exc_info=True in keyword arguments
                 for kw in node.keywords:
                     if kw.arg == "exc_info":
@@ -392,6 +400,59 @@ class LoggingASTVisitor(ast.NodeVisitor):
             self.bare_except_blocks.append(node.lineno)
         self.generic_visit(node)
     
+    def _extract_error_template(self, node: ast.Call) -> str:
+        """Extract error message template from a logging call node."""
+        if not node.args:
+            return "<unknown>"
+        
+        first_arg = node.args[0]
+        
+        # String literal
+        if isinstance(first_arg, ast.Str):
+            template = first_arg.s
+        # Python 3.8+ Constant
+        elif isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+            template = first_arg.value
+        # f-string (JoinedStr)
+        elif isinstance(first_arg, ast.JoinedStr):
+            parts = []
+            for value in first_arg.values:
+                if isinstance(value, ast.Str):
+                    parts.append(value.s)
+                elif isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    parts.append(value.value)
+                else:
+                    parts.append("{...}")
+            template = "".join(parts)
+        # String concatenation (BinOp with Add)
+        elif isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, ast.Add):
+            # Try to extract literals, but mark as dynamic if complex
+            try:
+                parts = []
+                self._extract_string_parts(first_arg, parts)
+                if parts:
+                    template = "".join(parts)
+                else:
+                    return "<dynamic>"
+            except:
+                return "<dynamic>"
+        else:
+            return "<dynamic>"
+        
+        # Normalize whitespace (collapse runs of spaces)
+        template = re.sub(r'\s+', ' ', template.strip())
+        return template
+    
+    def _extract_string_parts(self, node: ast.AST, parts: list) -> None:
+        """Helper to extract string parts from string concatenation."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            self._extract_string_parts(node.left, parts)
+            self._extract_string_parts(node.right, parts)
+        elif isinstance(node, ast.Str):
+            parts.append(node.s)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            parts.append(node.value)
+    
     def check_json_formatting(self):
         """Check for JSON formatting indicators in config locations and file content."""
         json_indicators = [
@@ -477,6 +538,11 @@ class RepoScanner:
         self.unknown_logger_vars = defaultdict(int)  # var_name -> total_call_count
         self.unknown_logger_var_files = defaultdict(set)  # var_name -> set of files
         
+        # Error template tracking (production only)
+        self.error_templates = []  # List of (template, level, file, line_no)
+        self.error_template_counts = Counter()  # template -> count
+        self.error_template_files = defaultdict(set)  # template -> set of files
+        
         # Cache metrics (optional)
         self.cache_metrics = {
             "pycache_dirs": 0,
@@ -493,6 +559,37 @@ class RepoScanner:
             if part in self.ignore_dirs:
                 return True
         return False
+    
+    def is_test_file(self, filepath: Path) -> bool:
+        """Check if file is a test file (always exclude from production audit)."""
+        rel_path = str(filepath.relative_to(self.root))
+        rel_path_lower = rel_path.lower()
+        filename = filepath.name.lower()
+        
+        # Check for test directories
+        if "\\tests\\" in rel_path or "/tests/" in rel_path_lower:
+            return True
+        if "\\test\\" in rel_path or "/test/" in rel_path_lower:
+            return True
+        if "tests\\" in rel_path or "tests/" in rel_path_lower:
+            return True
+        if "test\\" in rel_path or "test/" in rel_path_lower:
+            return True
+        
+        # Check for test file patterns
+        if filename.startswith("test_") or filename.endswith("_test.py"):
+            return True
+        
+        # Check for fixtures directories
+        if "fixtures" in rel_path_lower and ("test" in rel_path_lower or "tests" in rel_path_lower):
+            return True
+        
+        return False
+    
+    def is_self_file(self, filepath: Path) -> bool:
+        """Check if file is the scanner itself (always exclude)."""
+        rel_path = str(filepath.relative_to(self.root))
+        return rel_path.replace("\\", "/") == "tools/dev/repo_scan.py"
     
     def analyze_python_file(self, filepath: Path, content: str) -> Dict[str, Any]:
         """Analyze a Python file using AST."""
@@ -561,6 +658,13 @@ class RepoScanner:
         self.exception_stats["traceback_calls"] += visitor.traceback_calls
         for line_no in visitor.bare_except_blocks:
             self.exception_stats["bare_except_blocks"].append((rel_path, line_no))
+        
+        # Track error templates (production only)
+        for template, level, line_no in visitor.error_templates:
+            self.error_templates.append((template, level, rel_path, line_no))
+            if template not in ("<dynamic>", "<unknown>"):
+                self.error_template_counts[template] += 1
+                self.error_template_files[template].add(rel_path)
         
         # Track unknown logger variables
         for var_name, count in visitor.unknown_logger_vars.items():
@@ -632,6 +736,16 @@ class RepoScanner:
                     # Count all discovered Python files
                     self.scan_coverage["python_files_discovered"] += 1
                     
+                    # Skip self (repo_scan.py) - always exclude
+                    if self.is_self_file(filepath):
+                        self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
+                        continue
+                    
+                    # Skip test files (production-only audit) - always exclude
+                    if self.is_test_file(filepath):
+                        self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
+                        continue
+                    
                     # Skip if in ignored directory
                     if self.should_ignore_for_content_scan(filepath):
                         self.scan_coverage["python_files_skipped"]["ignored_path"].append(rel_path)
@@ -691,6 +805,25 @@ class RepoScanner:
         files_with_both = sorted(self.file_has_both_print_and_logger, 
                                 key=lambda x: x["print_calls"] + x["logging_calls"], 
                                 reverse=True)
+        
+        # High unknown logger usage
+        total_generic_calls = sum(self.logging_stats["generic_logging"]["calls"].values())
+        total_all_calls = (
+            sum(self.logging_stats["stdlib_logging"]["calls"].values()) +
+            sum(self.logging_stats["structlog"]["calls"].values()) +
+            total_generic_calls
+        )
+        high_unknown_usage = total_all_calls > 0 and (total_generic_calls / total_all_calls) > 0.1  # >10% unknown
+        
+        # Error template statistics
+        dynamic_template_count = sum(1 for t, _, _, _ in self.error_templates if t == "<dynamic>")
+        unknown_template_count = sum(1 for t, _, _, _ in self.error_templates if t == "<unknown>")
+        total_error_calls = (
+            self.level_counts.get("error", 0) +
+            self.level_counts.get("exception", 0) +
+            self.level_counts.get("critical", 0)
+        )
+        high_dynamic_errors = total_error_calls > 0 and (dynamic_template_count / total_error_calls) > 0.3  # >30% dynamic
         
         return {
             "meta": {
@@ -756,6 +889,29 @@ class RepoScanner:
                 "traceback_calls": self.exception_stats["traceback_calls"],
                 "bare_except_blocks": self.exception_stats["bare_except_blocks"][:20]  # Top 20
             },
+            "error_logging": {
+                "total_error_calls": (
+                    self.level_counts.get("error", 0) +
+                    self.level_counts.get("exception", 0) +
+                    self.level_counts.get("critical", 0)
+                ),
+                "error_calls": self.level_counts.get("error", 0),
+                "exception_calls": self.level_counts.get("exception", 0),
+                "critical_calls": self.level_counts.get("critical", 0),
+                "error_with_exc_info": self.exception_stats["exc_info_calls"],
+                "unique_templates": len(self.error_template_counts),
+                "dynamic_templates": sum(1 for t, _, _, _ in self.error_templates if t == "<dynamic>"),
+                "unknown_templates": sum(1 for t, _, _, _ in self.error_templates if t == "<unknown>"),
+                "top_templates": [
+                    {
+                        "template": template,
+                        "count": count,
+                        "example_files": list(self.error_template_files[template])[:3]
+                    }
+                    for template, count in self.error_template_counts.most_common(20)
+                ]
+            },
+            "_error_details": self.error_templates,  # Internal: full error details for top files calculation
             "unknown_logger_vars": {
                 "top_vars": sorted(self.unknown_logger_vars.items(), key=lambda x: x[1], reverse=True)[:10],
                 "var_files": {var: list(files)[:5] for var, files in list(self.unknown_logger_var_files.items())[:10]}
@@ -772,7 +928,12 @@ class RepoScanner:
                     self.logging_stats["structlog"]["get_logger"] > 0 and
                     sum(self.logging_stats["structlog"]["calls"].values()) == 0 and
                     any(cfg["config_type"] == "structlog.configure" for cfg in self.logging_configs)
-                )
+                ),
+                "high_unknown_logger_usage": high_unknown_usage,
+                "unknown_logger_percentage": (total_generic_calls / total_all_calls * 100) if total_all_calls > 0 else 0,
+                "high_dynamic_error_templates": high_dynamic_errors,
+                "dynamic_error_percentage": (dynamic_template_count / total_error_calls * 100) if total_error_calls > 0 else 0,
+                "unknown_error_percentage": (unknown_template_count / total_error_calls * 100) if total_error_calls > 0 else 0
             }
         }
         
@@ -853,6 +1014,36 @@ class RepoScanner:
                 lines.append(f"- ... and {len(skipped_detail['parse_error']) - 5} more")
             lines.append("")
         
+        # Logging System Identification
+        lines.append("## Logging System Identification")
+        lines.append("")
+        stdlib_total = sum(data["logging_usage"]["stdlib_logging"]["method_calls"].values())
+        structlog_total = sum(data["logging_usage"]["structlog"]["method_calls"].values())
+        generic_total = sum(data["logging_usage"]["generic_logging"]["method_calls"].values())
+        
+        systems_detected = []
+        if stdlib_total > 0:
+            systems_detected.append("stdlib logging")
+        if structlog_total > 0:
+            systems_detected.append("structlog")
+        if generic_total > 0:
+            systems_detected.append("unknown/generic")
+        
+        if systems_detected:
+            lines.append(f"**Systems detected:** {', '.join(systems_detected)}")
+        else:
+            lines.append("**Systems detected:** None (no logger calls found in production code)")
+        lines.append("")
+        lines.append("| System | Total Logger Calls |")
+        lines.append("|--------|-------------------|")
+        if stdlib_total > 0:
+            lines.append(f"| stdlib logging | {stdlib_total} |")
+        if structlog_total > 0:
+            lines.append(f"| structlog | {structlog_total} |")
+        if generic_total > 0:
+            lines.append(f"| unknown/generic | {generic_total} |")
+        lines.append("")
+        
         # Logging Usage Summary
         lines.append("## Logging Usage Summary")
         lines.append("")
@@ -915,6 +1106,43 @@ class RepoScanner:
         lines.append(f"| **Total** | {data['logging_usage']['print_calls']} |")
         lines.append("")
         
+        # Production Error Logging Summary (KEY SECTION)
+        if "error_logging" in data:
+            error_data = data["error_logging"]
+            lines.append("## Production Error Logging Summary")
+            lines.append("")
+            lines.append(f"**Total Error-Like Calls:** {error_data['total_error_calls']}")
+            lines.append("")
+            lines.append("### Breakdown by Level")
+            lines.append("")
+            lines.append("| Level | Count |")
+            lines.append("|-------|-------|")
+            lines.append(f"| ERROR | {error_data['error_calls']} |")
+            lines.append(f"| EXCEPTION | {error_data['exception_calls']} |")
+            lines.append(f"| CRITICAL | {error_data['critical_calls']} |")
+            lines.append("")
+            lines.append(f"**Error calls with `exc_info=True`:** {error_data['error_with_exc_info']}")
+            lines.append("")
+            lines.append("### Error Message Templates")
+            lines.append("")
+            lines.append(f"- **Unique templates (excluding dynamic/unknown):** {error_data['unique_templates']}")
+            lines.append(f"- **Dynamic templates (f-strings, concatenation, etc.):** {error_data['dynamic_templates']}")
+            lines.append(f"- **Unknown templates (no extractable message):** {error_data['unknown_templates']}")
+            lines.append("")
+            if error_data["top_templates"]:
+                lines.append("### Top 20 Error Templates")
+                lines.append("")
+                lines.append("| Template | Count | Example Files |")
+                lines.append("|----------|-------|---------------|")
+                for item in error_data["top_templates"]:
+                    examples = ", ".join([f"`{f}`" for f in item["example_files"][:3]])
+                    if len(item["example_files"]) > 3:
+                        examples += f" (+{len(item['example_files']) - 3} more)"
+                    # Truncate long templates for readability
+                    template_display = item["template"][:100] + "..." if len(item["template"]) > 100 else item["template"]
+                    lines.append(f"| `{template_display}` | {item['count']} | {examples} |")
+                lines.append("")
+        
         # Top Offenders
         lines.append("## Top Offenders")
         lines.append("")
@@ -928,6 +1156,23 @@ class RepoScanner:
             for item in data["logging_usage"]["top_logging_files"]:
                 lines.append(f"| `{item['file']}` | {item['count']} |")
             lines.append("")
+        
+        # Top files by error-like calls
+        if "error_logging" in data:
+            # Calculate top files by error calls
+            file_error_counts = defaultdict(int)
+            for template, level, file_path, line_no in data.get("_error_details", []):
+                if level in ("error", "exception", "critical"):
+                    file_error_counts[file_path] += 1
+            top_error_files = sorted(file_error_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            if top_error_files:
+                lines.append("### Top 10 Files by Error-Like Logger Calls")
+                lines.append("")
+                lines.append("| File | Calls |")
+                lines.append("|------|-------|")
+                for file_path, count in top_error_files:
+                    lines.append(f"| `{file_path}` | {count} |")
+                lines.append("")
         
         # Top files by print calls
         if data["logging_usage"]["top_print_files"]:
@@ -1063,6 +1308,26 @@ class RepoScanner:
             lines.append("Consider standardizing on a single logging system or improving logger variable tracking.")
             lines.append("")
         
+        # High unknown logger usage
+        if findings.get("high_unknown_logger_usage"):
+            lines.append(f"⚠️ **High unknown/generic logger usage detected:** {findings.get('unknown_logger_percentage', 0):.1f}%")
+            lines.append("")
+            lines.append("A significant portion of logger calls could not be classified as stdlib or structlog.")
+            lines.append("This may indicate:")
+            lines.append("- Logger variables are created dynamically or passed as parameters")
+            lines.append("- Custom logging wrappers that need better tracking")
+            lines.append("- Import patterns that need to be recognized")
+            lines.append("")
+        
+        # High dynamic error templates
+        if findings.get("high_dynamic_error_templates"):
+            lines.append(f"⚠️ **High percentage of dynamic error templates:** {findings.get('dynamic_error_percentage', 0):.1f}%")
+            lines.append("")
+            lines.append("Many error messages use f-strings or string concatenation, making it difficult to")
+            lines.append("track unique error patterns. Consider using structured logging with consistent")
+            lines.append("error message templates for better observability.")
+            lines.append("")
+        
         # Unknown logger variable diagnostics
         if data.get("unknown_logger_vars", {}).get("top_vars"):
             lines.append("### Unknown Logger Variable Diagnostics")
@@ -1139,13 +1404,13 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         type=str,
         default=None,
         help="Output file path (optional). If not provided, output goes to stdout. "
-             "MUST be inside the scanned repository root (writing outside repo is not allowed)."
+             "MUST be outside the scanned repository root unless --allow-write-in-repo is used."
     )
     parser.add_argument(
-        "--allow-write-outside-repo",
+        "--allow-write-in-repo",
         action="store_true",
         default=False,
-        help="Allow writing output file outside the repository root (not recommended)"
+        help="Allow writing output file inside the repository root (not recommended)"
     )
     parser.add_argument(
         "--include-cache-metrics",
@@ -1163,20 +1428,21 @@ Note: This script is STRICTLY READ-ONLY. It never writes files or creates direct
         print(f"Error: Root directory does not exist: {root}", file=sys.stderr)
         return 1
     
-    # Check if --out path is outside repo root (prevent writing outside)
+    # Check if --out path is inside repo root (prevent writing inside by default)
     if args.out:
         out_path = Path(args.out).resolve()
         try:
             # Check if output path is inside or equal to repo root
             out_path.relative_to(root)
-            # Good - output path is inside repo root
-        except ValueError:
-            # Output path is outside repo root
-            if not args.allow_write_outside_repo:
-                print(f"Error: Output path '{out_path}' is outside the scanned repository root '{root}'.", file=sys.stderr)
-                print("This script can only write files inside the repository root.", file=sys.stderr)
-                print("Please specify an output path inside the repository root, or use --allow-write-outside-repo flag.", file=sys.stderr)
+            # Output path is inside repo root
+            if not args.allow_write_in_repo:
+                print(f"Error: Output path '{out_path}' is inside the scanned repository root '{root}'.", file=sys.stderr)
+                print("This script is STRICTLY READ-ONLY and cannot write files inside the repository.", file=sys.stderr)
+                print("Please specify an output path outside the repository root, or use --allow-write-in-repo flag.", file=sys.stderr)
                 return 1
+        except ValueError:
+            # Good - output path is outside repo root
+            pass
     
     # Perform scan
     scanner = RepoScanner(str(root), include_cache_metrics=args.include_cache_metrics)
