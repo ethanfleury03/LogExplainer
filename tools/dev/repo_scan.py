@@ -565,6 +565,18 @@ class LoggingASTVisitor(ast.NodeVisitor):
             parts.append("{}")
             return True
     
+    def _stringify_attribute_chain(self, node):
+        """Convert attribute chain to string (e.g., self.foo._log -> 'self.foo._log')."""
+        parts = []
+        current = node
+        while isinstance(current, ast.Attribute):
+            parts.insert(0, current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.insert(0, current.id)
+            return ".".join(parts)
+        return None
+    
     def check_json_formatting(self):
         """Check for JSON formatting indicators in config locations and file content."""
         json_indicators = [
