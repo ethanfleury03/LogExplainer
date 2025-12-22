@@ -7,6 +7,13 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# Configure logging first (before any logger usage)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Try to load .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
@@ -29,13 +36,6 @@ except ImportError:
 
 from backend.routes import error_debug_routes
 from backend.utils.db import init_db
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Initialize database
 logger.info("Initializing database...")
