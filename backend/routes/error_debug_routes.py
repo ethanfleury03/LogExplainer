@@ -814,3 +814,77 @@ Arrow Log Helper
             detail=f"Failed to send email: {str(e)}"
         )
 
+
+@router.get("/machines/{machine_id}/error-keys")
+async def get_machine_error_keys(
+    machine_id: str,
+    db: Session = Depends(get_db),
+    user: DevUser = Depends(require_role)
+):
+    """Get all error keys from a machine's active index."""
+    try:
+        machine_uuid = uuid.UUID(machine_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid machine_id format")
+    
+    machine = db.query(Machine).filter(Machine.id == machine_uuid).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    
+    if not machine.active_version_id:
+        return {
+            "machine_id": machine_id,
+            "error_keys": [],
+            "total_errors": 0,
+            "message": "No active index for this machine"
+        }
+    
+    # Load active index
+    try:
+        version = db.query(MachineIndexVersion).filter(
+            MachineIndexVersion.id == machine.active_version_id
+        ).first()
+        if not version:
+            raise HTTPException(status_code=404, detail="Active version not found")
+        
+        # Try cache first
+        index_data = _get_cached_index(machine_id, str(version.id))
+        if not index_data:
+            # Load from storage
+            try:
+                index_bytes = load_index_file(version.gcs_bucket, version.gcs_object)
+                index_data = json.loads(index_bytes.decode('utf-8'))
+                _set_cached_index(machine_id, str(version.id), index_data)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="Index file not found in storage")
+            except Exception as e:
+                logger.error(f"Failed to load index: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to load index: {e}")
+        
+        # Extract error keys from error_index
+        error_index = index_data.get('error_index', {})
+        error_keys = []
+        
+        for error_key, chunk_ids in error_index.items():
+            error_keys.append({
+                "key": error_key,
+                "chunk_count": len(chunk_ids) if isinstance(chunk_ids, list) else 1
+            })
+        
+        # Sort by chunk count (descending) then by key
+        error_keys.sort(key=lambda x: (-x['chunk_count'], x['key']))
+        
+        return {
+            "machine_id": machine_id,
+            "error_keys": error_keys,
+            "total_errors": len(error_keys),
+            "total_chunks": version.total_chunks,
+            "indexed_at": version.indexed_at.isoformat() if version.indexed_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get error keys: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get error keys: {str(e)}")
+

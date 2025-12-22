@@ -36,11 +36,15 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   }, []);
 
   // Check if we should show the sidebar (computed values)
+  // Show MachineSidebar on Error Debug and Error Library pages (both use machine indexes)
   const isErrorDebugArea = mounted && pathname?.startsWith('/tech/error-debug') || false;
-  const shouldShow = isErrorDebugArea && user && hasRole(user, 'TECHNICIAN');
+  const isLibraryArea = mounted && pathname?.startsWith('/library') || false;
+  const shouldShow = (isErrorDebugArea || isLibraryArea) && user && hasRole(user, 'TECHNICIAN');
 
-  // Extract machine ID from pathname if on error-debug page
-  const selectedMachineId = pathname?.match(/\/tech\/error-debug\/([^\/]+)/)?.[1] || null;
+  // Extract machine ID from pathname if on error-debug or library page
+  const errorDebugMachineId = pathname?.match(/\/tech\/error-debug\/([^\/]+)/)?.[1] || null;
+  const libraryMachineId = pathname?.match(/\/library\/([^\/]+)/)?.[1] || null;
+  const selectedMachineId = errorDebugMachineId || libraryMachineId;
 
   // Define loadMachines after computed values (but before useEffect hooks)
   const loadMachines = async () => {
@@ -109,10 +113,10 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     }
   }, [mounted, shouldShow, pathname, router]);
 
-  // Always render container when in Error Debug area to maintain layout order
+  // Always render container when in Error Debug or Library area to maintain layout order
   // This prevents sidebars from flipping positions
   // Conditional return AFTER all hooks are called
-  if (!mounted || !isErrorDebugArea) {
+  if (!mounted || (!isErrorDebugArea && !isLibraryArea)) {
     return <div className="w-0" />; // Invisible placeholder to maintain flex order
   }
 
@@ -143,7 +147,13 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   };
 
   const handleMachineClick = (machineId: string) => {
-    router.push(`/tech/error-debug/${machineId}`);
+    // Navigate based on current page - keep user on same page type but switch machine
+    if (isLibraryArea) {
+      // If on library page, navigate to library with machine ID
+      router.push(`/library/${machineId}`);
+    } else {
+      router.push(`/tech/error-debug/${machineId}`);
+    }
   };
 
   const handleUploadClick = (e: React.MouseEvent, machineId: string) => {

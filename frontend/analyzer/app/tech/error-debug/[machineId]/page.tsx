@@ -66,8 +66,19 @@ export default function MachineSearchPage() {
     );
   }
 
+  // Clear all data when machineId changes - this ensures fresh data for the new machine
   useEffect(() => {
+    // Clear previous machine's data immediately
+    setMachine(null);
+    setQuery('');
+    setResults([]);
+    setSelectedChunk(null);
+    setExpandedKeys(new Set());
+    setError(null);
+    
+    // Load new machine data
     loadMachine();
+    
     // Check for upload query param
     const params = new URLSearchParams(window.location.search);
     if (params.get('upload') === 'true') {
@@ -77,15 +88,18 @@ export default function MachineSearchPage() {
 
   const loadMachine = async () => {
     try {
+      setError(null);
       const machines = await listMachines();
       const found = machines.find((m) => m.id === machineId);
       if (!found) {
         setError('Machine not found');
+        setMachine(null);
         return;
       }
       setMachine(found);
     } catch (err: any) {
       setError(err.message || 'Failed to load machine');
+      setMachine(null);
     }
   };
 

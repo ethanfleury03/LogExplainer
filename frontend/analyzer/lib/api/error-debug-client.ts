@@ -327,3 +327,26 @@ export async function emailIngestScript(email: string): Promise<{ message: strin
   return response.json();
 }
 
+export async function getMachineErrorKeys(machineId: string): Promise<{
+  machine_id: string;
+  error_keys: Array<{ key: string; chunk_count: number }>;
+  total_errors: number;
+  total_chunks: number;
+  indexed_at: string | null;
+  message?: string;
+}> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/error-debug/machines/${machineId}/error-keys`,
+    {
+      headers: await getHeaders(),
+    }
+  );
+  
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(error.detail || `Failed to get error keys: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
