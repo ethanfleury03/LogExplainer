@@ -10,12 +10,6 @@ import { Card } from '@/components/ui/card';
 export default function ErrorDebugPage() {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
-  
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-  
-  const user = mounted ? getCurrentUser() : null;
   const [machines, setMachines] = useState<Machine[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -28,29 +22,7 @@ export default function ErrorDebugPage() {
     printing_type: '',
   });
 
-  // Check role access (only after mount to avoid hydration mismatch)
-  if (mounted && (!user || !hasRole(user, 'TECHNICIAN'))) {
-    return (
-      <div className="p-8">
-        <h1 className="text-2xl font-bold mb-4">Access Denied</h1>
-        <p>This page is only accessible to TECHNICIAN and ADMIN users.</p>
-      </div>
-    );
-  }
-  
-  // Show loading during SSR/hydration
-  if (!mounted) {
-    return (
-      <div className="p-8">
-        <div className="text-center py-8">Loading...</div>
-      </div>
-    );
-  }
-
-  useEffect(() => {
-    loadMachines();
-  }, []);
-
+  // Define loadMachines before useEffect (but after all useState hooks)
   const loadMachines = async () => {
     try {
       setLoading(true);
@@ -71,6 +43,42 @@ export default function ErrorDebugPage() {
       setLoading(false);
     }
   };
+
+  // All hooks must be called before any conditional returns
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (mounted) {
+      loadMachines();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted]);
+
+  // Get user only after mount to avoid hydration mismatch
+  const user = mounted ? getCurrentUser() : null;
+
+  // Check role access (only after mount to avoid hydration mismatch)
+  // This conditional return happens AFTER all hooks are called
+  if (mounted && (!user || !hasRole(user, 'TECHNICIAN'))) {
+    return (
+      <div className="p-8">
+        <h1 className="text-2xl font-bold mb-4">Access Denied</h1>
+        <p>This page is only accessible to TECHNICIAN and ADMIN users.</p>
+      </div>
+    );
+  }
+  
+  // Show loading during SSR/hydration
+  // This conditional return happens AFTER all hooks are called
+  if (!mounted) {
+    return (
+      <div className="p-8">
+        <div className="text-center py-8">Loading...</div>
+      </div>
+    );
+  }
 
   const handleCreateMachine = async (e: React.FormEvent) => {
     e.preventDefault();
