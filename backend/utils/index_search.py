@@ -69,6 +69,49 @@ def _filter_significant_tokens(tokens: List[str]) -> List[str]:
     return [t for t in tokens if len(t) > 2 and t not in _STOP_WORDS]
 
 
+def _extract_match_excerpt(query: str, text: str, context_chars: int = 100) -> str:
+    """
+    Extract a relevant excerpt from text that shows why it matched the query.
+    Returns a snippet around the match location.
+    """
+    query_lower = query.lower()
+    text_lower = text.lower()
+    
+    # Find the position of the query in the text
+    pos = text_lower.find(query_lower)
+    if pos >= 0:
+        # Extract context around the match
+        start = max(0, pos - context_chars)
+        end = min(len(text), pos + len(query) + context_chars)
+        excerpt = text[start:end]
+        # Add ellipsis if needed
+        if start > 0:
+            excerpt = '...' + excerpt
+        if end < len(text):
+            excerpt = excerpt + '...'
+        return excerpt.strip()
+    
+    # If exact phrase not found, try to find significant tokens
+    query_tokens = _filter_significant_tokens(query_lower.split())
+    if not query_tokens:
+        return ""
+    
+    # Find first significant token
+    first_token = query_tokens[0] if query_tokens else None
+    if first_token and first_token in text_lower:
+        pos = text_lower.find(first_token)
+        start = max(0, pos - context_chars)
+        end = min(len(text), pos + len(first_token) + context_chars)
+        excerpt = text[start:end]
+        if start > 0:
+            excerpt = '...' + excerpt
+        if end < len(text):
+            excerpt = excerpt + '...'
+        return excerpt.strip()
+    
+    return ""
+
+
 def _calculate_phrase_match_score(query: str, text: str) -> float:
     """
     Calculate score for phrase match in text.
@@ -157,11 +200,18 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
                 error_key = match_info.get('original_message', normalized_query)
                 if error_key not in seen_error_keys:
                     seen_error_keys.add(error_key)
+                    chunk = chunks_dict[chunk_id]
+                    # Extract match excerpt from error message or code
+                    matched_text = error_key  # Use the error message itself as match
+                    if not matched_text:
+                        # Fallback to code excerpt
+                        matched_text = _extract_match_excerpt(error_message, chunk.get('code', ''))
                     results.append({
                         'error_key': error_key,
-                        'chunks': [chunks_dict[chunk_id]],
+                        'chunks': [chunk],
                         'match_type': 'exact',
-                        'score': 1.0
+                        'score': 1.0,
+                        'matched_text': matched_text
                     })
     
     # Strategy 2: Partial match (if no exact results or need more)
@@ -205,11 +255,20 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
                     chunks.append(chunks_dict[chunk_id])
             
             if chunks:
+                # Extract match excerpt from the first chunk's error message or code
+                matched_text = error_key  # Use the error key as match
+                if chunks:
+                    chunk = chunks[0]
+                    # Try to find better excerpt in code if error_key is too generic
+                    code_excerpt = _extract_match_excerpt(error_message, chunk.get('code', ''))
+                    if code_excerpt and len(code_excerpt) > len(matched_text):
+                        matched_text = code_excerpt
                 results.append({
                     'error_key': error_key,
                     'chunks': chunks,
                     'match_type': 'partial',
-                    'score': score
+                    'score': score,
+                    'matched_text': matched_text
                 })
     
     # Strategy 3: Code content search (if no results from error_index)
@@ -277,11 +336,31 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
             for file_path, chunk_scores in sorted_files[:10]:  # Top 10 files by max score
                 chunks = [c[0] for c in chunk_scores]
                 max_score = max(c[1] for c in chunk_scores)
+                # Extract match excerpt from the best matching chunk
+                best_chunk = max(chunk_scores, key=lambda x: x[1])[0]
+                matched_text = ""
+                # Try error messages first
+                for error_msg in best_chunk.get('error_messages', []):
+                    msg = error_msg.get('message', '')
+                    if normalized_query.lower() in msg.lower():
+                        matched_text = msg
+                        break
+                # Fallback to code excerpt
+                if not matched_text:
+                    matched_text = _extract_match_excerpt(error_message, best_chunk.get('code', ''))
+                # If still no match, use a snippet from code
+                if not matched_text and best_chunk.get('code'):
+                    code = best_chunk.get('code', '')
+                    if len(code) > 150:
+                        matched_text = code[:150] + '...'
+                    else:
+                        matched_text = code
                 results.append({
                     'error_key': f"Code match in {file_path}",
                     'chunks': chunks,
                     'match_type': 'code_search',
-                    'score': max_score
+                    'score': max_score,
+                    'matched_text': matched_text
                 })
     
     # Sort results: exact matches first, then by score

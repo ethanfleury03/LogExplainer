@@ -34,8 +34,9 @@ interface SearchResult {
     }>;
     log_levels: string[];
   }>;
-  match_type: 'exact' | 'partial';
+  match_type: 'exact' | 'partial' | 'code_search';
   score: number;
+  matched_text?: string;
 }
 
 export default function MachineSearchPage() {
@@ -332,6 +333,10 @@ export default function MachineSearchPage() {
 
           {results.length > 0 && (
             <div>
+              <div className="mb-3 p-2 bg-gray-50 rounded border">
+                <div className="text-xs font-medium text-gray-700 mb-1">Search:</div>
+                <div className="text-xs text-gray-900 break-words">{query}</div>
+              </div>
               <h3 className="font-medium mb-2">Results ({results.length})</h3>
               <div className="space-y-2">
                 {results.map((result, idx) => (
@@ -345,6 +350,12 @@ export default function MachineSearchPage() {
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
                         <div className="font-medium text-sm">{result.error_key}</div>
+                        {result.matched_text && (
+                          <div className="mt-1 p-1.5 bg-yellow-50 border border-yellow-200 rounded text-xs">
+                            <div className="font-medium text-gray-700 mb-0.5">Match:</div>
+                            <div className="text-gray-900 break-words">{result.matched_text}</div>
+                          </div>
+                        )}
                         <div className="text-xs text-gray-500 mt-1">
                           {result.chunks.length} chunk(s) • {result.match_type} match
                         </div>
