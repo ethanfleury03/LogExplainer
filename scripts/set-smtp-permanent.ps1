@@ -37,7 +37,12 @@ if ($Gmail) {
     }
     
     if (-not $Password) {
-        $Password = Read-Host "App Password (16 characters, no spaces)" -AsSecureString
+        $passwordSecure = Read-Host "App Password (16 characters, no spaces)" -AsSecureString
+        $Password = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure)
+        )
+    } elseif ($Password -is [SecureString]) {
+        # Convert SecureString to plain string if it was passed as SecureString
         $Password = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
         )
@@ -61,7 +66,12 @@ if ($Gmail) {
         $Username = Read-Host "SMTP Username"
     }
     if (-not $Password) {
-        $Password = Read-Host "SMTP Password" -AsSecureString
+        $passwordSecure = Read-Host "SMTP Password" -AsSecureString
+        $Password = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure)
+        )
+    } elseif ($Password -is [SecureString]) {
+        # Convert SecureString to plain string if it was passed as SecureString
         $Password = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
         )
