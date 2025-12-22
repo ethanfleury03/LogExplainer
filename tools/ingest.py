@@ -310,8 +310,18 @@ def _extract_error_messages_from_ast(node):
     
     # Check for raise statements: raise ValueError("msg")
     if isinstance(node, ast.Raise):
-        if node.exc and isinstance(node.exc, ast.Call):
-            for arg in node.exc.args:
+        # Python 2.7: ast.Raise has 'type', 'inst', 'tback'
+        # Python 3: ast.Raise has 'exc', 'cause'
+        exc_node = None
+        if hasattr(node, 'exc'):
+            # Python 3
+            exc_node = node.exc
+        elif hasattr(node, 'inst'):
+            # Python 2.7
+            exc_node = node.inst
+        
+        if exc_node and isinstance(exc_node, ast.Call):
+            for arg in exc_node.args:
                 str_val = _get_string_value(arg)
                 if str_val:
                     errors.append((str_val, 'E', 'exception'))
@@ -625,23 +635,16 @@ Examples:
   python tools/ingest.py --root /opt/memjet --out /index.json --progress
         """
     )
-    # Smart default for --root: use /opt/memjet if it exists, otherwise current directory
+    # Default root: always use /opt/memjet (printer filesystem)
     default_root = '/opt/memjet'
-    if not os.path.isdir(default_root):
-        # Fallback to current working directory
-        default_root = os.getcwd()
     
-    # Smart default for --out: use /root/index.json if /root exists, otherwise use script's directory
-    default_out = '/root/index.json'
-    if not os.path.isdir('/root'):
-        # Fallback to script's directory (where ingest.py is located)
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        default_out = os.path.join(script_dir, 'index.json')
+    # Default output: save to /index.json (root of filesystem where script lives)
+    default_out = '/index.json'
     
     parser.add_argument('--root', default=default_root, 
-                       help='Root directory to index (default: /opt/memjet if exists, else current directory)')
+                       help='Root directory to index (default: /opt/memjet)')
     parser.add_argument('--out', default=default_out, 
-                       help='Output index file path (default: /root/index.json if /root exists, else ./index.json)')
+                       help='Output index file path (default: /index.json)')
     parser.add_argument('--include-ext', nargs='+', default=['.py'],
                        help='File extensions to include (default: .py)')
     parser.add_argument('--exclude-dir', nargs='+', default=None,
