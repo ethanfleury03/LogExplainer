@@ -716,6 +716,18 @@ async def email_ingest_script(
     from email import encoders
     
     # Check SMTP configuration
+    # Reload .env file to ensure we have latest values (in case it was updated)
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+        repo_root = Path(__file__).parent.parent.parent.resolve()
+        env_file = repo_root / '.env'
+        if env_file.exists():
+            load_dotenv(env_file, override=True)
+            logger.info(f"Reloaded .env file from {env_file}")
+    except Exception as e:
+        logger.warning(f"Could not reload .env file: {e}")
+    
     smtp_host = os.environ.get('SMTP_HOST')
     smtp_port = os.environ.get('SMTP_PORT', '587')
     smtp_username = os.environ.get('SMTP_USERNAME')

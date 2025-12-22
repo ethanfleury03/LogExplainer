@@ -599,7 +599,14 @@ Examples:
   python tools/ingest.py --root /opt/memjet --out /index.json --progress
         """
     )
-    parser.add_argument('--root', default='/opt/memjet', help='Root directory to index (default: /opt/memjet)')
+    # Smart default for --root: use /opt/memjet if it exists, otherwise current directory
+    default_root = '/opt/memjet'
+    if not os.path.isdir(default_root):
+        # Fallback to current working directory
+        default_root = os.getcwd()
+    
+    parser.add_argument('--root', default=default_root, 
+                       help='Root directory to index (default: /opt/memjet if exists, else current directory)')
     parser.add_argument('--out', default='/root/index.json', help='Output index file path (default: /root/index.json)')
     parser.add_argument('--include-ext', nargs='+', default=['.py'],
                        help='File extensions to include (default: .py)')
@@ -612,8 +619,12 @@ Examples:
     
     args = parser.parse_args()
     
+    # Resolve root path to absolute path
+    args.root = os.path.abspath(args.root)
+    
     if not os.path.isdir(args.root):
         print("ERROR: Root path is not a directory: {}".format(args.root), file=sys.stderr)
+        print("Current working directory: {}".format(os.getcwd()), file=sys.stderr)
         sys.exit(1)
     
     print("Indexing codebase: {}".format(args.root))

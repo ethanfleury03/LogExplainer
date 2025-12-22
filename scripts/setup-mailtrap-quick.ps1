@@ -77,21 +77,24 @@ $envContent = $envLines -join [Environment]::NewLine
 
 # Read existing .env and preserve non-SMTP variables
 if (Test-Path $envFile) {
+    Write-Host "  Found existing .env file, removing old SMTP settings..." -ForegroundColor Gray
     $existingContent = Get-Content $envFile -Raw
     $newline = [Environment]::NewLine
     # Remove ALL SMTP and INVITE_FROM lines, including comments
+    # Also remove any lines that start with # and contain SMTP
     $lines = $existingContent -split $newline | Where-Object { 
         $line = $_.Trim()
         $line -notmatch '^SMTP_' -and $line -notmatch '^INVITE_FROM_' -and $line -notmatch '^#.*SMTP' -and $line -ne ''
     }
-    $otherContent = $lines -join $newline
+    $otherContent = ($lines | Where-Object { $_.Trim() -ne '' }) -join $newline
     
-    if ($otherContent) {
-        $newContent = $otherContent + $newline + $newline + $envContent
+    if ($otherContent -and $otherContent.Trim() -ne '') {
+        $newContent = $otherContent.Trim() + $newline + $newline + $envContent
     } else {
         $newContent = $envContent
     }
 } else {
+    Write-Host "  Creating new .env file..." -ForegroundColor Gray
     $newContent = $envContent
 }
 
