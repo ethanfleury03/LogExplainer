@@ -30,6 +30,9 @@ if PY2:
 else:
     unicode = str
 
+# Check if AsyncFunctionDef exists (Python 3.5+)
+HAS_ASYNC_FUNCTION = hasattr(ast, 'AsyncFunctionDef')
+
 
 # Default exclude directories
 DEFAULT_EXCLUDE_DIRS = {
@@ -191,7 +194,11 @@ def _extract_leading_comment_block(lines, def_line_idx, max_window=30):
 
 def _extract_docstring_from_ast(node):
     """Extract docstring from AST node (function/class)."""
-    if not isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+    # Build function types tuple (Python 2.7 doesn't have AsyncFunctionDef)
+    function_types = (ast.FunctionDef,)
+    if HAS_ASYNC_FUNCTION:
+        function_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+    if not isinstance(node, function_types + (ast.ClassDef,)):
         return None
     
     if not node.body:
@@ -211,7 +218,11 @@ def _extract_docstring_from_ast(node):
 
 def _extract_signature_from_ast(node, source_lines):
     """Extract function signature from AST node, handling multi-line signatures."""
-    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    # Build function types tuple (Python 2.7 doesn't have AsyncFunctionDef)
+    function_types = (ast.FunctionDef,)
+    if HAS_ASYNC_FUNCTION:
+        function_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+    if not isinstance(node, function_types):
         return None
     
     # Get the def line
@@ -432,7 +443,11 @@ def _extract_functions_from_node(node, file_path, source_lines, class_name=None,
         stats = {'functions_found': 0, 'errors_found': 0}
     
     # Extract functions at this level
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    # Build function types tuple (Python 2.7 doesn't have AsyncFunctionDef)
+    function_types = (ast.FunctionDef,)
+    if HAS_ASYNC_FUNCTION:
+        function_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+    if isinstance(node, function_types):
         chunk = extract_function_chunk(file_path, node, source_lines, class_name)
         chunks.append(chunk)
         stats['functions_found'] += 1
@@ -572,7 +587,13 @@ def index_codebase(root_path, output_path, include_exts=None, exclude_dirs=None,
         # Create output directory if it doesn't exist
         output_dir = os.path.dirname(os.path.abspath(output_path))
         if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
+            # Python 2.7 doesn't have exist_ok parameter, so check manually
+            try:
+                os.makedirs(output_dir)
+            except OSError:
+                # Directory might have been created by another process
+                if not os.path.exists(output_dir):
+                    raise
         
         with open(output_path, 'wb') as f:
             json_str = json.dumps(index, indent=2, ensure_ascii=False)
