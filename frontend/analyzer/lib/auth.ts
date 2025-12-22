@@ -13,14 +13,15 @@ export function getCurrentUser(): User | null {
   const devBypass = process.env.NEXT_PUBLIC_DEV_AUTH_BYPASS === 'true';
   const isProduction = process.env.NODE_ENV === 'production';
   
-  if (devBypass && !isProduction) {
+  // In dev mode, always return a default user to prevent blank sidebars
+  if (!isProduction) {
     // Check for role override in query param
     const params = new URLSearchParams(window.location.search);
     const roleOverride = params.get('as') as UserRole | null;
     const role: UserRole = 
-      roleOverride && ['admin', 'tech', 'customer'].includes(roleOverride)
+      roleOverride && ['ADMIN', 'TECHNICIAN', 'CUSTOMER'].includes(roleOverride)
         ? roleOverride
-        : 'tech'; // Default to tech for dev
+        : 'TECHNICIAN'; // Default to TECHNICIAN for dev
 
     return {
       id: 'dev-user',
@@ -39,9 +40,9 @@ export function hasRole(user: User | null, requiredRole: UserRole): boolean {
   if (!user) return false;
   
   const roleHierarchy: Record<UserRole, number> = {
-    customer: 1,
-    tech: 2,
-    admin: 3,
+    CUSTOMER: 1,
+    TECHNICIAN: 2,
+    ADMIN: 3,
   };
 
   return roleHierarchy[user.role] >= roleHierarchy[requiredRole];

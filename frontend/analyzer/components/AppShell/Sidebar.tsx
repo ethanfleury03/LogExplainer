@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { User } from '@/lib/types';
 import { hasRole } from '@/lib/auth';
-import { Search, BookOpen, Settings, Database } from 'lucide-react';
+import { Search, BookOpen, Settings, Database, Bug } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
@@ -12,10 +12,11 @@ interface SidebarProps {
 }
 
 const navItems = [
-  { href: '/', label: 'Search', icon: Search, roles: ['admin', 'tech'] as const },
-  { href: '/library', label: 'Error Library', icon: BookOpen, roles: ['admin', 'tech'] as const },
-  { href: '/index-manager', label: 'Index Manager', icon: Database, roles: ['admin'] as const },
-  { href: '/settings', label: 'Settings', icon: Settings, roles: ['admin', 'tech'] as const },
+  { href: '/', label: 'Search', icon: Search, roles: ['ADMIN', 'TECHNICIAN'] as const },
+  { href: '/library', label: 'Error Library', icon: BookOpen, roles: ['ADMIN', 'TECHNICIAN'] as const },
+  { href: '/tech/error-debug', label: 'Error Debug', icon: Bug, roles: ['ADMIN', 'TECHNICIAN'] as const },
+  { href: '/index-manager', label: 'Index Manager', icon: Database, roles: ['ADMIN'] as const },
+  { href: '/settings', label: 'Settings', icon: Settings, roles: ['ADMIN', 'TECHNICIAN'] as const },
 ];
 
 export function Sidebar({ user }: SidebarProps) {

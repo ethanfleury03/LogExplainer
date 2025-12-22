@@ -5,6 +5,7 @@ import { User } from '@/lib/types';
 import { getCurrentUser } from '@/lib/auth';
 import { TopBar } from './TopBar';
 import { Sidebar } from './Sidebar';
+import { MachineSidebar } from './MachineSidebar';
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -22,6 +23,7 @@ export function AppShell({ children }: AppShellProps) {
     <div className="h-screen flex flex-col">
       <TopBar user={user} selectedIndex={selectedIndex} onIndexChange={setSelectedIndex} />
       <div className="flex-1 flex overflow-hidden">
+        <MachineSidebar user={user} />
         <Sidebar user={user} />
         <main className="flex-1 overflow-auto">{children}</main>
       </div>
