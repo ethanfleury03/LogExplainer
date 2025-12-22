@@ -113,18 +113,18 @@ import sys
 import os
 from pathlib import Path
 
-repo_root = Path(r'$repoRoot')
-env_file = repo_root / '.env'
+repo_root = Path(r"$repoRoot")
+env_file = repo_root / ".env"
 
 if env_file.exists():
     from dotenv import load_dotenv
     load_dotenv(env_file)
 
-smtp_host = os.environ.get('SMTP_HOST')
-smtp_port = int(os.environ.get('SMTP_PORT', '587'))
-smtp_username = os.environ.get('SMTP_USERNAME')
-smtp_password = os.environ.get('SMTP_PASSWORD')
-smtp_use_tls = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'
+smtp_host = os.environ.get("SMTP_HOST")
+smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+smtp_username = os.environ.get("SMTP_USERNAME")
+smtp_password = os.environ.get("SMTP_PASSWORD")
+smtp_use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
 
 try:
     print(f"Connecting to {smtp_host}:{smtp_port}...")
