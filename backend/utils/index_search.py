@@ -143,6 +143,57 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
                     'score': score
                 })
     
+    # Strategy 3: Code content search (if no results from error_index)
+    if not results:
+        normalized_query = normalize_error_message(error_message)
+        query_tokens = normalized_query.split()
+        query_lower = normalized_query.lower()
+        
+        # Search within chunk code content
+        scored_chunks = []
+        for chunk in index_data.get('chunks', []):
+            code = chunk.get('code', '').lower()
+            signature = chunk.get('signature', '').lower()
+            docstring = (chunk.get('docstring', '') or '').lower()
+            leading_comment = (chunk.get('leading_comment', '') or '').lower()
+            
+            # Combine all searchable text
+            searchable_text = ' '.join([code, signature, docstring, leading_comment])
+            
+            # Check if query appears in any searchable text
+            if query_lower in searchable_text or any(token in searchable_text for token in query_tokens if len(token) > 3):
+                # Calculate relevance score
+                code_matches = searchable_text.count(query_lower)
+                token_matches = sum(1 for token in query_tokens if len(token) > 3 and token in searchable_text)
+                # Higher score for matches in code vs comments
+                code_weight = 1.0 if query_lower in code else 0.5
+                score = (code_matches * code_weight) + (token_matches / max(len(query_tokens), 1) * 0.3)
+                
+                scored_chunks.append((chunk, score))
+        
+        # Sort by score and take top 25
+        scored_chunks.sort(key=lambda x: x[1], reverse=True)
+        
+        if scored_chunks:
+            # Group by file_path for cleaner results
+            file_groups = {}
+            for chunk, score in scored_chunks[:25]:
+                file_path = chunk.get('file_path', 'unknown')
+                if file_path not in file_groups:
+                    file_groups[file_path] = []
+                file_groups[file_path].append((chunk, score))
+            
+            # Create results grouped by file
+            for file_path, chunk_scores in list(file_groups.items())[:10]:  # Top 10 files
+                chunks = [c[0] for c in chunk_scores]
+                max_score = max(c[1] for c in chunk_scores)
+                results.append({
+                    'error_key': f"Code match in {file_path}",
+                    'chunks': chunks,
+                    'match_type': 'code_search',
+                    'score': max_score
+                })
+    
     # Sort results: exact matches first, then by score
     results.sort(key=lambda x: (x['match_type'] != 'exact', -x['score']))
     

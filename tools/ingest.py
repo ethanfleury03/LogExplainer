@@ -293,6 +293,12 @@ def _extract_error_messages_from_ast(node):
                     str_val = _get_string_value(arg)
                     if str_val:
                         errors.append((str_val, log_level, 'logging'))
+                    elif isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute):
+                        # Handle .format() calls: "Error: {} {}".format(x, y)
+                        if arg.func.attr == 'format' and arg.func.value:
+                            format_template = _get_string_value(arg.func.value)
+                            if format_template:
+                                errors.append((format_template, log_level, 'logging_format_template'))
                     elif isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mod):
                         # String formatting: "Error: %s" % value
                         str_val = _get_string_value(arg.left)
