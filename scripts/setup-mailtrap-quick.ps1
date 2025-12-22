@@ -7,11 +7,11 @@ Write-Host "  Mailtrap SMTP Setup (Easiest Option)" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Mailtrap is perfect for development because:" -ForegroundColor Yellow
-Write-Host "  ✓ No App Passwords needed" -ForegroundColor Green
-Write-Host "  ✓ No 2FA required" -ForegroundColor Green
-Write-Host "  ✓ Free tier available" -ForegroundColor Green
-Write-Host "  ✓ Emails are captured (not actually sent)" -ForegroundColor Green
-Write-Host "  ✓ View emails in web interface" -ForegroundColor Green
+Write-Host "  - No App Passwords needed" -ForegroundColor Green
+Write-Host "  - No 2FA required" -ForegroundColor Green
+Write-Host "  - Free tier available" -ForegroundColor Green
+Write-Host "  - Emails are captured (not actually sent)" -ForegroundColor Green
+Write-Host "  - View emails in web interface" -ForegroundColor Green
 Write-Host ""
 
 $useMailtrap = Read-Host "Do you already have a Mailtrap account? (Y/n)"
@@ -49,8 +49,16 @@ if ([string]::IsNullOrWhiteSpace($fromEmail)) { $fromEmail = "noreply@example.co
 $fromName = Read-Host "From Name (default: Arrow Systems Support)"
 if ([string]::IsNullOrWhiteSpace($fromName)) { $fromName = "Arrow Systems Support" }
 
-# Build .env content
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Determine script and repo paths
+if ($PSScriptRoot) {
+    $scriptDir = $PSScriptRoot
+} else {
+    $scriptPath = $MyInvocation.MyCommand.Path
+    if (-not $scriptPath) {
+        $scriptPath = $PSCommandPath
+    }
+    $scriptDir = Split-Path -Parent $scriptPath
+}
 $repoRoot = Split-Path -Parent $scriptDir
 $envFile = Join-Path $repoRoot ".env"
 
