@@ -11,15 +11,21 @@ from fastapi.middleware.cors import CORSMiddleware
 try:
     from dotenv import load_dotenv
     # Load .env file from backend directory or parent directory
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
-    if not os.path.exists(env_path):
-        env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
-    if os.path.exists(env_path):
-        load_dotenv(env_path)
-        logging.info(f"Loaded environment variables from {env_path}")
+    backend_env = os.path.join(os.path.dirname(__file__), '.env')
+    root_env = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+    
+    # Try backend/.env first, then root/.env
+    if os.path.exists(backend_env):
+        load_dotenv(backend_env)
+        logger.info(f"Loaded environment variables from {backend_env}")
+    elif os.path.exists(root_env):
+        load_dotenv(root_env)
+        logger.info(f"Loaded environment variables from {root_env}")
+    else:
+        logger.info("No .env file found. Using system environment variables.")
 except ImportError:
     # python-dotenv not installed, skip .env loading
-    pass
+    logger.warning("python-dotenv not installed. .env file will not be loaded. Install with: pip install python-dotenv")
 
 from backend.routes import error_debug_routes
 from backend.utils.db import init_db

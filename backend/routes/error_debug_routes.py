@@ -724,11 +724,21 @@ async def email_ingest_script(
     from_email = os.environ.get('INVITE_FROM_EMAIL', 'noreply@example.com')
     from_name = os.environ.get('INVITE_FROM_NAME', 'Arrow Log Helper')
     
+    # Log configuration status (without sensitive data)
+    logger.info(f"SMTP config check: host={'SET' if smtp_host else 'NOT SET'}, username={'SET' if smtp_username else 'NOT SET'}, password={'SET' if smtp_password else 'NOT SET'}")
+    
     if not smtp_host:
         logger.warning("Email request received but SMTP_HOST not configured")
         raise HTTPException(
             status_code=503,
             detail="SMTP not configured. SMTP_HOST environment variable is not set. Email functionality is disabled in development mode."
+        )
+    
+    if not smtp_username or not smtp_password:
+        logger.warning(f"SMTP credentials incomplete: username={'SET' if smtp_username else 'MISSING'}, password={'SET' if smtp_password else 'MISSING'}")
+        raise HTTPException(
+            status_code=503,
+            detail="SMTP credentials incomplete. Both SMTP_USERNAME and SMTP_PASSWORD must be set for Gmail authentication."
         )
     
     # Read ingest.py file

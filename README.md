@@ -133,108 +133,46 @@ PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"
 
 The Error Debug feature allows technicians to manage printer machines, upload codebase indexes, and search for error messages.
 
-### Prerequisites
+### Quick Setup
 
-- Python 3.8+ for backend
-- Node.js 18+ for frontend
-- PostgreSQL (optional, SQLite fallback available)
+Run the unified setup script to configure everything:
 
-### Quick Start (2 Terminals)
+```powershell
+.\setup.ps1
+```
+
+This script will:
+- Check Python installation
+- Create/activate virtual environment
+- Install backend dependencies
+- Initialize database
+- Configure SMTP (optional)
+
+### Running the Application
 
 **Terminal 1 - Backend:**
 ```bash
 cd backend
-pip install -r requirements.txt  # First time only
-python main.py
-# Should see: "Uvicorn running on http://0.0.0.0:8000"
+python -m uvicorn main:app --reload --port 8000
 ```
 
 **Terminal 2 - Frontend:**
 ```bash
 cd frontend/analyzer
 npm install  # First time only
-
-# Create .env.local if it doesn't exist
-echo NEXT_PUBLIC_API_URL=http://localhost:8000 > .env.local
-echo NEXT_PUBLIC_DEV_AUTH_BYPASS=true >> .env.local
-
 npm run dev
-# Should see: "Ready on http://localhost:3000"
 ```
 
 Then navigate to `http://localhost:3000/tech/error-debug`
 
-### Backend Setup
+### SMTP Configuration
 
-1. Install dependencies:
-   ```bash
-   cd backend
-   pip install -r requirements.txt
-   ```
+The setup script will prompt you to configure SMTP. Options:
 
-2. Set environment variables (optional):
-   
-   **Quick Setup (Windows PowerShell):**
-   ```powershell
-   # Simple setup with placeholder values (no credentials needed)
-   .\scripts\setup-smtp-env-simple.ps1
-   
-   # Or interactive setup (prompts for SMTP credentials)
-   .\scripts\setup-smtp-env.ps1
-   ```
-   
-   **Quick Setup (Windows CMD):**
-   ```cmd
-   scripts\setup-smtp-env.bat
-   ```
-   
-   **Manual Setup:**
-   ```bash
-   export DATABASE_URL="postgresql://user:pass@localhost/dbname"  # Optional, uses SQLite if not set
-   export GCS_BUCKET="your-bucket"  # Optional, uses local storage if not set
-   export GCS_CREDENTIALS="/path/to/credentials.json"  # Optional
-   export SMTP_HOST="smtp.example.com"  # Optional, for email script feature
-   export SMTP_PORT="587"
-   export SMTP_USERNAME="user"
-   export SMTP_PASSWORD="pass"
-   export SMTP_USE_TLS="true"
-   export INVITE_FROM_EMAIL="noreply@example.com"
-   export INVITE_FROM_NAME="Arrow Log Helper"
-   ```
-   
-   **Note:** The backend automatically loads `.env` file if `python-dotenv` is installed. 
-   See `scripts/README-SMTP-SETUP.md` for detailed SMTP setup instructions.
+- **Mailtrap** (recommended for development) - sign up at https://mailtrap.io
+- **Gmail** - requires an App Password (generate at https://myaccount.google.com/apppasswords)
 
-3. Start backend:
-   ```bash
-   cd backend
-   python main.py
-   # Or: uvicorn main:app --reload --port 8000
-   ```
-
-   Backend will be available at `http://localhost:8000`
-
-### Frontend Setup
-
-1. Install dependencies:
-   ```bash
-   cd frontend/analyzer
-   npm install
-   ```
-
-2. Set environment variables:
-   ```bash
-   export NEXT_PUBLIC_API_URL="http://localhost:8000"
-   export NEXT_PUBLIC_DEV_AUTH_BYPASS="true"  # Enable dev auth bypass
-   ```
-
-3. Start frontend:
-   ```bash
-   cd frontend/analyzer
-   npm run dev
-   ```
-
-   Frontend will be available at `http://localhost:3000`
+You can also skip SMTP setup and configure it later by creating a `.env` file in the root directory.
 
 ### Usage
 

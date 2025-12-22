@@ -42,7 +42,7 @@ export default function MachineSearchPage() {
   const params = useParams();
   const router = useRouter();
   const machineId = params.machineId as string;
-  const user = getCurrentUser();
+  const [mounted, setMounted] = useState(false);
   
   const [machine, setMachine] = useState<Machine | null>(null);
   const [query, setQuery] = useState('');
@@ -56,36 +56,7 @@ export default function MachineSearchPage() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Check role access
-  if (!user || !hasRole(user, 'TECHNICIAN')) {
-    return (
-      <div className="p-8">
-        <h1 className="text-2xl font-bold mb-4">Access Denied</h1>
-        <p>This page is only accessible to TECHNICIAN and ADMIN users.</p>
-      </div>
-    );
-  }
-
-  // Clear all data when machineId changes - this ensures fresh data for the new machine
-  useEffect(() => {
-    // Clear previous machine's data immediately
-    setMachine(null);
-    setQuery('');
-    setResults([]);
-    setSelectedChunk(null);
-    setExpandedKeys(new Set());
-    setError(null);
-    
-    // Load new machine data
-    loadMachine();
-    
-    // Check for upload query param
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('upload') === 'true') {
-      setShowUploadModal(true);
-    }
-  }, [machineId]);
-
+  // Define loadMachine before useEffect hooks (but after useState hooks)
   const loadMachine = async () => {
     try {
       setError(null);
@@ -102,6 +73,57 @@ export default function MachineSearchPage() {
       setMachine(null);
     }
   };
+
+  // All hooks must be called before any conditional returns
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Clear all data when machineId changes - this ensures fresh data for the new machine
+  useEffect(() => {
+    if (!mounted) return; // Don't run during SSR
+    
+    // Clear previous machine's data immediately
+    setMachine(null);
+    setQuery('');
+    setResults([]);
+    setSelectedChunk(null);
+    setExpandedKeys(new Set());
+    setError(null);
+    
+    // Load new machine data
+    loadMachine();
+    
+    // Check for upload query param
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('upload') === 'true') {
+      setShowUploadModal(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machineId, mounted]);
+
+  // Get user only after mount to avoid hydration mismatch
+  const user = mounted ? getCurrentUser() : null;
+
+  // Check role access (only after mount to avoid hydration mismatch)
+  // Conditional returns AFTER all hooks are called
+  if (mounted && (!user || !hasRole(user, 'TECHNICIAN'))) {
+    return (
+      <div className="p-8">
+        <h1 className="text-2xl font-bold mb-4">Access Denied</h1>
+        <p>This page is only accessible to TECHNICIAN and ADMIN users.</p>
+      </div>
+    );
+  }
+
+  // Show loading during SSR/hydration
+  if (!mounted) {
+    return (
+      <div className="p-8">
+        <div className="text-center py-8">Loading...</div>
+      </div>
+    );
+  }
 
   const handleSearch = async () => {
     if (!query.trim()) return;
