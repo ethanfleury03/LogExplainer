@@ -104,7 +104,10 @@ if ($test -eq "" -or $test -eq "Y" -or $test -eq "y") {
     Write-Host ""
     Write-Host "Testing connection..." -ForegroundColor Yellow
     
-    $testScript = @'
+    # Create temporary Python script file
+    $tempScript = Join-Path $env:TEMP "test_smtp_$(Get-Random).py"
+    
+    $pythonCode = @"
 import smtplib
 import sys
 import os
@@ -140,12 +143,17 @@ try:
 except Exception as e:
     print(f"ERROR: {e}")
     sys.exit(1)
-'@
+"@
     
-    # Replace the variable in the script
-    $testScript = $testScript -replace '\$repoRoot', $repoRoot
-    
-    python -c $testScript
+    try {
+        Set-Content -Path $tempScript -Value $pythonCode -Encoding UTF8
+        python $tempScript
+        Remove-Item $tempScript -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "  ERROR: Failed to run test script" -ForegroundColor Red
+        Write-Host "  $_" -ForegroundColor Red
+        Remove-Item $tempScript -ErrorAction SilentlyContinue
+    }
     if ($LASTEXITCODE -eq 0) {
         Write-Host ""
         Write-Host "SUCCESS: SMTP configuration is working!" -ForegroundColor Green
