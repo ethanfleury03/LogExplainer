@@ -314,7 +314,14 @@ export async function emailIngestScript(email: string): Promise<{ message: strin
   
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(error.detail || `Failed to send email: ${response.statusText}`);
+    const errorMessage = error.detail || error.message || `Failed to send email: ${response.statusText}`;
+    
+    // Provide more helpful error messages
+    if (response.status === 503) {
+      throw new Error(`Email service unavailable: ${errorMessage}. Please configure SMTP settings in the backend.`);
+    }
+    
+    throw new Error(errorMessage);
   }
   
   return response.json();

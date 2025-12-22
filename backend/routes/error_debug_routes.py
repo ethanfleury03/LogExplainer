@@ -725,12 +725,10 @@ async def email_ingest_script(
     from_name = os.environ.get('INVITE_FROM_NAME', 'Arrow Log Helper')
     
     if not smtp_host:
-        return JSONResponse(
+        logger.warning("Email request received but SMTP_HOST not configured")
+        raise HTTPException(
             status_code=503,
-            content={
-                "error": "SMTP not configured",
-                "message": "SMTP_HOST environment variable is not set. Email functionality is disabled in development mode."
-            }
+            detail="SMTP not configured. SMTP_HOST environment variable is not set. Email functionality is disabled in development mode."
         )
     
     # Read ingest.py file
@@ -790,18 +788,29 @@ Arrow Log Helper
     
     # Send email
     try:
-        server = smtplib.SMTP(smtp_host, int(smtp_port))
+        server = smtplib.SMTP(smtp_host, int(smtp_port), timeout=10)
         if smtp_use_tls:
             server.starttls()
         if smtp_username and smtp_password:
             server.login(smtp_username, smtp_password)
         server.send_message(msg)
         server.quit()
+        logger.info(f"Email sent successfully to {email}")
         
         return {
             "message": "Email sent successfully",
             "to": email
         }
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error sending email to {email}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"SMTP server error: {str(e)}. Please check SMTP configuration."
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {e}")
+        logger.error(f"Unexpected error sending email to {email}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send email: {str(e)}"
+        )
 

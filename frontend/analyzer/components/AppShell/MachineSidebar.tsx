@@ -35,13 +35,14 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     setMounted(true);
   }, []);
 
-  // Check if we should show the sidebar (must be after all hooks)
+  // Check if we should show the sidebar (computed values)
   const isErrorDebugArea = mounted && pathname?.startsWith('/tech/error-debug') || false;
   const shouldShow = isErrorDebugArea && user && hasRole(user, 'TECHNICIAN');
 
   // Extract machine ID from pathname if on error-debug page
   const selectedMachineId = pathname?.match(/\/tech\/error-debug\/([^\/]+)/)?.[1] || null;
 
+  // Define loadMachines after computed values (but before useEffect hooks)
   const loadMachines = async () => {
     if (!shouldShow) return; // Don't load if not showing
     
@@ -79,10 +80,12 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     }
   };
 
+  // All hooks must be called before any conditional returns
   useEffect(() => {
     if (shouldShow && mounted) {
       loadMachines();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldShow, mounted]);
 
   // Refresh machines when pathname changes (e.g., after navigation)
@@ -90,6 +93,7 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     if (shouldShow && isErrorDebugArea && mounted) {
       loadMachines();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname, shouldShow, isErrorDebugArea, mounted]);
 
   // Handle ?add=1 query param to auto-open Add Machine modal
@@ -104,6 +108,13 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
       }
     }
   }, [mounted, shouldShow, pathname, router]);
+
+  // Always render container when in Error Debug area to maintain layout order
+  // This prevents sidebars from flipping positions
+  // Conditional return AFTER all hooks are called
+  if (!mounted || !isErrorDebugArea) {
+    return <div className="w-0" />; // Invisible placeholder to maintain flex order
+  }
 
 
   const handleCreateMachine = async (e: React.FormEvent) => {
@@ -168,10 +179,9 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     }
   };
 
-  // Early return AFTER all hooks are called
-  // Also return null during SSR to avoid hydration mismatch
-  if (!mounted || !shouldShow) {
-    return null;
+  // If user doesn't have permission, show empty sidebar to maintain layout
+  if (!shouldShow) {
+    return <div className="w-64 border-r bg-muted/20 h-full flex flex-col" />;
   }
 
   return (
