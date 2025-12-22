@@ -53,6 +53,75 @@ def _length_proximity_score(query_len: int, key_len: int) -> float:
     return 1.0 - (diff / max_len)
 
 
+# Common stop words to filter out for better search precision
+_STOP_WORDS = {
+    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from',
+    'has', 'he', 'in', 'is', 'it', 'its', 'of', 'on', 'that', 'the',
+    'to', 'was', 'will', 'with', 'get', 'got', 'go', 'goes', 'went',
+    'this', 'these', 'they', 'them', 'their', 'there', 'then', 'than',
+    'have', 'had', 'has', 'having', 'do', 'does', 'did', 'doing',
+    'can', 'could', 'should', 'would', 'may', 'might', 'must'
+}
+
+
+def _filter_significant_tokens(tokens: List[str]) -> List[str]:
+    """Filter out stop words and very short tokens."""
+    return [t for t in tokens if len(t) > 2 and t not in _STOP_WORDS]
+
+
+def _calculate_phrase_match_score(query: str, text: str) -> float:
+    """
+    Calculate score for phrase match in text.
+    Higher score for:
+    - Exact phrase match
+    - Most tokens in order
+    - Significant tokens (not stop words)
+    """
+    query_lower = query.lower()
+    text_lower = text.lower()
+    
+    # Exact phrase match gets highest score
+    if query_lower in text_lower:
+        return 1.0
+    
+    # Tokenize and filter
+    query_tokens = _filter_significant_tokens(query_lower.split())
+    if not query_tokens:
+        return 0.0
+    
+    text_tokens = text_lower.split()
+    
+    # Check how many significant tokens match
+    matched_tokens = sum(1 for token in query_tokens if token in text_lower)
+    token_ratio = matched_tokens / len(query_tokens)
+    
+    # Require at least 50% of significant tokens to match
+    if token_ratio < 0.5:
+        return 0.0
+    
+    # Check for token order (bigrams/trigrams)
+    order_score = 0.0
+    if len(query_tokens) >= 2:
+        # Check if consecutive tokens appear in order
+        ordered_pairs = 0
+        for i in range(len(query_tokens) - 1):
+            token1 = query_tokens[i]
+            token2 = query_tokens[i + 1]
+            # Find positions of tokens in text
+            if token1 in text_lower and token2 in text_lower:
+                pos1 = text_lower.find(token1)
+                pos2 = text_lower.find(token2, pos1)
+                if pos2 > pos1:  # Token2 appears after token1
+                    ordered_pairs += 1
+        if len(query_tokens) > 1:
+            order_score = ordered_pairs / (len(query_tokens) - 1)
+    
+    # Combined score: token ratio + order preservation
+    score = (token_ratio * 0.6) + (order_score * 0.4)
+    
+    return score
+
+
 def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Search chunk-based index for error message.
@@ -146,29 +215,49 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
     # Strategy 3: Code content search (if no results from error_index)
     if not results:
         normalized_query = normalize_error_message(error_message)
-        query_tokens = normalized_query.split()
         query_lower = normalized_query.lower()
         
-        # Search within chunk code content
+        # Filter to significant tokens only
+        query_tokens = _filter_significant_tokens(query_lower.split())
+        
+        # Require at least 2 significant tokens for code search
+        if len(query_tokens) < 2:
+            return results
+        
+        # Search within chunk code content with improved scoring
         scored_chunks = []
         for chunk in index_data.get('chunks', []):
             code = chunk.get('code', '').lower()
             signature = chunk.get('signature', '').lower()
             docstring = (chunk.get('docstring', '') or '').lower()
             leading_comment = (chunk.get('leading_comment', '') or '').lower()
+            error_messages = [e.get('message', '').lower() for e in chunk.get('error_messages', [])]
             
-            # Combine all searchable text
-            searchable_text = ' '.join([code, signature, docstring, leading_comment])
+            # Priority 1: Check error messages in chunk (highest relevance)
+            error_msg_score = 0.0
+            for error_msg in error_messages:
+                if error_msg:
+                    error_msg_score = max(error_msg_score, _calculate_phrase_match_score(normalized_query, error_msg))
             
-            # Check if query appears in any searchable text
-            if query_lower in searchable_text or any(token in searchable_text for token in query_tokens if len(token) > 3):
-                # Calculate relevance score
-                code_matches = searchable_text.count(query_lower)
-                token_matches = sum(1 for token in query_tokens if len(token) > 3 and token in searchable_text)
-                # Higher score for matches in code vs comments
-                code_weight = 1.0 if query_lower in code else 0.5
-                score = (code_matches * code_weight) + (token_matches / max(len(query_tokens), 1) * 0.3)
-                
+            # Priority 2: Check code content
+            code_score = _calculate_phrase_match_score(normalized_query, code)
+            
+            # Priority 3: Check docstring and comments (lower relevance)
+            doc_score = _calculate_phrase_match_score(normalized_query, docstring + ' ' + leading_comment)
+            
+            # Combined score with weights
+            # Error messages get highest weight, then code, then docs
+            if error_msg_score > 0:
+                score = error_msg_score * 1.0  # Full weight for error message matches
+            elif code_score > 0:
+                score = code_score * 0.8  # Slightly lower for code matches
+            elif doc_score > 0:
+                score = doc_score * 0.5  # Lower for doc/comment matches
+            else:
+                score = 0.0
+            
+            # Only include chunks with meaningful matches (score >= 0.3)
+            if score >= 0.3:
                 scored_chunks.append((chunk, score))
         
         # Sort by score and take top 25
@@ -183,8 +272,9 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
                     file_groups[file_path] = []
                 file_groups[file_path].append((chunk, score))
             
-            # Create results grouped by file
-            for file_path, chunk_scores in list(file_groups.items())[:10]:  # Top 10 files
+            # Create results grouped by file, only include top scoring files
+            sorted_files = sorted(file_groups.items(), key=lambda x: max(c[1] for c in x[1]), reverse=True)
+            for file_path, chunk_scores in sorted_files[:10]:  # Top 10 files by max score
                 chunks = [c[0] for c in chunk_scores]
                 max_score = max(c[1] for c in chunk_scores)
                 results.append({
