@@ -73,7 +73,7 @@ if (Test-Path $envFile) {
     $lines = $existingContent -split $newline | Where-Object { 
         $_ -notmatch '^SMTP_' -and $_ -notmatch '^INVITE_FROM_' -and $_ -notmatch '^#.*SMTP'
     }
-    $otherContent = ($lines | Where-Object { $_ -ne "" -and $_ -notmatch "^\s*$" }) -join $newline
+    $otherContent = ($lines | Where-Object { $_.Trim() -ne '' }) -join $newline
     
     if ($otherContent) {
         $newContent = $otherContent + $newline + $newline + $envContent
