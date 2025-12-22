@@ -71,7 +71,7 @@ if (Test-Path $envFile) {
     $existingContent = Get-Content $envFile -Raw
     $newline = [Environment]::NewLine
     $lines = $existingContent -split $newline | Where-Object { 
-        $_ -notmatch "^SMTP_" -and $_ -notmatch "^INVITE_FROM_" -and $_ -notmatch "^# SMTP"
+        $_ -notmatch '^SMTP_' -and $_ -notmatch '^INVITE_FROM_' -and $_ -notmatch '^#.*SMTP'
     }
     $otherContent = ($lines | Where-Object { $_ -ne "" -and $_ -notmatch "^\s*$" }) -join $newline
     
