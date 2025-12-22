@@ -80,15 +80,33 @@ async function getHeaders(): Promise<HeadersInit> {
 }
 
 export async function listMachines(): Promise<Machine[]> {
-  const response = await fetch(`${API_BASE_URL}/api/error-debug/machines`, {
-    headers: await getHeaders(),
-  });
+  const url = `${API_BASE_URL}/api/error-debug/machines`;
+  const headers = await getHeaders();
   
-  if (!response.ok) {
-    throw new Error(`Failed to list machines: ${response.statusText}`);
+  console.log('listMachines: Requesting', url, 'with headers', Object.keys(headers));
+  
+  try {
+    const response = await fetch(url, {
+      headers,
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('listMachines: Response not OK', response.status, errorText);
+      throw new Error(`Failed to list machines: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    console.log('listMachines: Success', data.length, 'machines');
+    return data;
+  } catch (err: any) {
+    console.error('listMachines: Fetch error', err);
+    // Re-throw with more context
+    if (err.name === 'TypeError' && err.message.includes('fetch')) {
+      throw new Error(`Network error: Cannot connect to ${API_BASE_URL}. Is the backend running?`);
+    }
+    throw err;
   }
-  
-  return response.json();
 }
 
 export async function createMachine(data: {

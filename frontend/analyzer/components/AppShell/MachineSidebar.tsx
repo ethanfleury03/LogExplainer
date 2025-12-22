@@ -42,19 +42,31 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     try {
       setLoading(true);
       setError(null);
+      
+      // Log API URL for debugging
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      console.log('MachineSidebar: Fetching machines from', `${apiUrl}/api/error-debug/machines`);
+      
       const data = await listMachines();
       setMachines(data);
       console.log(`MachineSidebar: Loaded ${data.length} machines`);
     } catch (err: any) {
       const errorMsg = err.message || 'Failed to load machines';
-      setError(errorMsg);
       console.error('MachineSidebar: Failed to load machines:', err);
+      console.error('MachineSidebar: Error details:', {
+        message: err.message,
+        stack: err.stack,
+        name: err.name,
+      });
       
       // Provide helpful error messages
       if (errorMsg.includes('403') || errorMsg.includes('401')) {
         setError('Access denied. Check auth headers.');
-      } else if (errorMsg.includes('Failed to fetch') || errorMsg.includes('NetworkError')) {
-        setError('Backend unreachable. Check API URL.');
+      } else if (errorMsg.includes('Failed to fetch') || errorMsg.includes('NetworkError') || err.name === 'TypeError') {
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        setError(`Backend unreachable at ${apiUrl}. Is the backend running?`);
+      } else {
+        setError(errorMsg);
       }
     } finally {
       setLoading(false);
