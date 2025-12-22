@@ -27,7 +27,7 @@ Write-Host ""
 Write-Host "Get your Mailtrap credentials:" -ForegroundColor Cyan
 Write-Host "  1. Go to https://mailtrap.io and sign in" -ForegroundColor White
 Write-Host "  2. Create an inbox (or use existing)" -ForegroundColor White
-Write-Host "  3. Go to inbox settings → SMTP Settings" -ForegroundColor White
+Write-Host "  3. Go to inbox settings -> SMTP Settings" -ForegroundColor White
 Write-Host "  4. Copy the credentials shown" -ForegroundColor White
 Write-Host ""
 
