@@ -681,14 +681,17 @@ async def search_index(
     results = search_chunk_index(query_text, index_data)
     
     elapsed_ms = int((time.time() - start_time) * 1000)
-    match_types = {'exact': 0, 'partial': 0}
+    match_types = {'exact': 0, 'partial': 0, 'code_search': 0}
     for r in results:
-        match_types[r.get('match_type', 'partial')] += 1
+        match_type = r.get('match_type', 'partial')
+        if match_type not in match_types:
+            match_types[match_type] = 0
+        match_types[match_type] += 1
     
     logger.info(
         f"Search result: machine_id={machine_id}, "
         f"normalized_query='{normalized_query[:50]}...', "
-        f"match_type=exact:{match_types['exact']}/partial:{match_types['partial']}, "
+        f"match_type=exact:{match_types.get('exact', 0)}/partial:{match_types.get('partial', 0)}/code_search:{match_types.get('code_search', 0)}, "
         f"total_results={len(results)}, "
         f"elapsed_ms={elapsed_ms}"
     )
