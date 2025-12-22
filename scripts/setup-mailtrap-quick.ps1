@@ -54,17 +54,18 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $envFile = Join-Path $repoRoot ".env"
 
-$envContent = @"
-# SMTP Configuration (Mailtrap - Development/Testing)
-# DO NOT MODIFY - Set via scripts/setup-mailtrap-quick.ps1
-SMTP_HOST=$smtpHost
-SMTP_PORT=$smtpPort
-SMTP_USERNAME=$smtpUsername
-SMTP_PASSWORD=$smtpPasswordPlain
-SMTP_USE_TLS=true
-INVITE_FROM_EMAIL=$fromEmail
-INVITE_FROM_NAME=$fromName
-"@
+# Build .env content
+$envLines = @()
+$envLines += "# SMTP Configuration (Mailtrap - Development/Testing)"
+$envLines += "# DO NOT MODIFY - Set via scripts/setup-mailtrap-quick.ps1"
+$envLines += "SMTP_HOST=$smtpHost"
+$envLines += "SMTP_PORT=$smtpPort"
+$envLines += "SMTP_USERNAME=$smtpUsername"
+$envLines += "SMTP_PASSWORD=$smtpPasswordPlain"
+$envLines += "SMTP_USE_TLS=true"
+$envLines += "INVITE_FROM_EMAIL=$fromEmail"
+$envLines += "INVITE_FROM_NAME=$fromName"
+$envContent = $envLines -join [Environment]::NewLine
 
 # Read existing .env and preserve non-SMTP variables
 if (Test-Path $envFile) {
