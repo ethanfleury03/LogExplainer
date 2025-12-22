@@ -30,3 +30,4 @@ def function_with_header_block():
     logger.error("Another error")
     return True
 
+
