@@ -44,6 +44,18 @@ import os
 import sys
 import time
 
+# Python version compatibility
+PY2 = sys.version_info[0] == 2
+if PY2:
+    # Python 2.7
+    try:
+        unicode
+    except NameError:
+        unicode = str
+else:
+    # Python 3
+    unicode = str
+
 # Tool version
 TOOL_VERSION = "1.0.0"
 
@@ -199,7 +211,17 @@ def generate_manifest(root, machine, out_path):
     for entry in entries:
         canonical_lines.append(canonical_entry_line(entry))
     fingerprint_content = '\n'.join(canonical_lines)
-    fingerprint_id = hashlib.sha256(fingerprint_content).hexdigest()
+    # Encode to bytes for hashing (Python 2.7 compatibility)
+    if PY2:
+        # Python 2.7: str is bytes, unicode needs encoding
+        if isinstance(fingerprint_content, unicode):
+            fingerprint_bytes = fingerprint_content.encode('utf-8')
+        else:
+            fingerprint_bytes = fingerprint_content
+    else:
+        # Python 3: str is unicode, always needs encoding
+        fingerprint_bytes = fingerprint_content.encode('utf-8')
+    fingerprint_id = hashlib.sha256(fingerprint_bytes).hexdigest()
     
     # Prepare stats
     stats = {
