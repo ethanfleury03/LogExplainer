@@ -152,6 +152,10 @@ This script will:
 
 **Terminal 1 - Backend:**
 ```bash
+# Run from repo root (recommended)
+python -m uvicorn backend.main:app --reload --port 8000
+
+# Or run from backend directory
 cd backend
 python -m uvicorn main:app --reload --port 8000
 ```

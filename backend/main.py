@@ -3,9 +3,17 @@ FastAPI application entry point for Error Debug feature.
 """
 
 import os
+import sys
 import logging
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Add parent directory to path so imports work from both repo root and backend directory
+_backend_dir = Path(__file__).parent.resolve()
+_repo_root = _backend_dir.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
 # Configure logging first (before any logger usage)
 logging.basicConfig(
@@ -18,14 +26,14 @@ logger = logging.getLogger(__name__)
 try:
     from dotenv import load_dotenv
     # Load .env file from backend directory or parent directory
-    backend_env = os.path.join(os.path.dirname(__file__), '.env')
-    root_env = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+    backend_env = _backend_dir / '.env'
+    root_env = _repo_root / '.env'
     
     # Try backend/.env first, then root/.env
-    if os.path.exists(backend_env):
+    if backend_env.exists():
         load_dotenv(backend_env)
         logger.info(f"Loaded environment variables from {backend_env}")
-    elif os.path.exists(root_env):
+    elif root_env.exists():
         load_dotenv(root_env)
         logger.info(f"Loaded environment variables from {root_env}")
     else:
