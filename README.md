@@ -173,6 +173,22 @@ Then navigate to `http://localhost:3000/tech/error-debug`
    ```
 
 2. Set environment variables (optional):
+   
+   **Quick Setup (Windows PowerShell):**
+   ```powershell
+   # Simple setup with placeholder values (no credentials needed)
+   .\scripts\setup-smtp-env-simple.ps1
+   
+   # Or interactive setup (prompts for SMTP credentials)
+   .\scripts\setup-smtp-env.ps1
+   ```
+   
+   **Quick Setup (Windows CMD):**
+   ```cmd
+   scripts\setup-smtp-env.bat
+   ```
+   
+   **Manual Setup:**
    ```bash
    export DATABASE_URL="postgresql://user:pass@localhost/dbname"  # Optional, uses SQLite if not set
    export GCS_BUCKET="your-bucket"  # Optional, uses local storage if not set
@@ -185,6 +201,9 @@ Then navigate to `http://localhost:3000/tech/error-debug`
    export INVITE_FROM_EMAIL="noreply@example.com"
    export INVITE_FROM_NAME="Arrow Log Helper"
    ```
+   
+   **Note:** The backend automatically loads `.env` file if `python-dotenv` is installed. 
+   See `scripts/README-SMTP-SETUP.md` for detailed SMTP setup instructions.
 
 3. Start backend:
    ```bash

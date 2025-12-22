@@ -104,11 +104,29 @@ export default function SettingsPage() {
                   disabled={sending}
                 />
               </div>
-              {emailError && (
-                <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded text-sm">
-                  {emailError}
-                </div>
-              )}
+      {emailError && (
+        <div className="mb-4 bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded text-sm">
+          {emailError.includes('SMTP not configured') || emailError.includes('SMTP_HOST') ? (
+            <div>
+              <p className="font-medium mb-2">SMTP not configured (Development Mode)</p>
+              <p className="text-xs mb-2">
+                To enable email functionality, set these environment variables in your backend:
+              </p>
+              <ul className="text-xs list-disc list-inside space-y-1">
+                <li><code className="bg-yellow-50 px-1 rounded">SMTP_HOST</code> - SMTP server address</li>
+                <li><code className="bg-yellow-50 px-1 rounded">SMTP_PORT</code> - Port (default: 587)</li>
+                <li><code className="bg-yellow-50 px-1 rounded">SMTP_USERNAME</code> - Optional, if auth required</li>
+                <li><code className="bg-yellow-50 px-1 rounded">SMTP_PASSWORD</code> - Optional, if auth required</li>
+                <li><code className="bg-yellow-50 px-1 rounded">SMTP_USE_TLS</code> - true/false (default: true)</li>
+                <li><code className="bg-yellow-50 px-1 rounded">INVITE_FROM_EMAIL</code> - Sender email</li>
+                <li><code className="bg-yellow-50 px-1 rounded">INVITE_FROM_NAME</code> - Sender name</li>
+              </ul>
+            </div>
+          ) : (
+            emailError
+          )}
+        </div>
+      )}
               {emailSuccess && (
                 <div className="mb-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded text-sm">
                   {emailSuccess}
