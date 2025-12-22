@@ -69,13 +69,14 @@ INVITE_FROM_NAME=$fromName
 # Read existing .env and preserve non-SMTP variables
 if (Test-Path $envFile) {
     $existingContent = Get-Content $envFile -Raw
-    $lines = $existingContent -split "`n" | Where-Object { 
+    $newline = [Environment]::NewLine
+    $lines = $existingContent -split $newline | Where-Object { 
         $_ -notmatch "^SMTP_" -and $_ -notmatch "^INVITE_FROM_" -and $_ -notmatch "^# SMTP"
     }
-    $otherContent = ($lines | Where-Object { $_ -ne "" -and $_ -notmatch "^\s*$" }) -join "`n"
+    $otherContent = ($lines | Where-Object { $_ -ne "" -and $_ -notmatch "^\s*$" }) -join $newline
     
     if ($otherContent) {
-        $newContent = $otherContent + "`n`n" + $envContent
+        $newContent = $otherContent + $newline + $newline + $envContent
     } else {
         $newContent = $envContent
     }
@@ -107,43 +108,45 @@ if ($test -eq "" -or $test -eq "Y" -or $test -eq "y") {
     # Create temporary Python script file
     $tempScript = Join-Path $env:TEMP "test_smtp_$(Get-Random).py"
     
-    $pythonCode = @"
-import smtplib
-import sys
-import os
-from pathlib import Path
-
-repo_root = Path(r"$repoRoot")
-env_file = repo_root / ".env"
-
-if env_file.exists():
-    from dotenv import load_dotenv
-    load_dotenv(env_file)
-
-smtp_host = os.environ.get("SMTP_HOST")
-smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-smtp_username = os.environ.get("SMTP_USERNAME")
-smtp_password = os.environ.get("SMTP_PASSWORD")
-smtp_use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
-
-try:
-    print(f"Connecting to {smtp_host}:{smtp_port}...")
-    server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
+    # Build Python code line by line to avoid PowerShell parsing issues
+    $pythonLines = @()
+    $pythonLines += 'import smtplib'
+    $pythonLines += 'import sys'
+    $pythonLines += 'import os'
+    $pythonLines += 'from pathlib import Path'
+    $pythonLines += ''
+    $pythonLines += "repo_root = Path(r'$repoRoot')"
+    $pythonLines += "env_file = repo_root / '.env'"
+    $pythonLines += ''
+    $pythonLines += 'if env_file.exists():'
+    $pythonLines += '    from dotenv import load_dotenv'
+    $pythonLines += '    load_dotenv(env_file)'
+    $pythonLines += ''
+    $pythonLines += "smtp_host = os.environ.get('SMTP_HOST')"
+    $pythonLines += "smtp_port = int(os.environ.get('SMTP_PORT', '587'))"
+    $pythonLines += "smtp_username = os.environ.get('SMTP_USERNAME')"
+    $pythonLines += "smtp_password = os.environ.get('SMTP_PASSWORD')"
+    $pythonLines += "smtp_use_tls = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'"
+    $pythonLines += ''
+    $pythonLines += 'try:'
+    $pythonLines += '    print(f"Connecting to {smtp_host}:{smtp_port}...")'
+    $pythonLines += '    server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)'
+    $pythonLines += '    '
+    $pythonLines += '    if smtp_use_tls:'
+    $pythonLines += '        print("Starting TLS...")'
+    $pythonLines += '        server.starttls()'
+    $pythonLines += '    '
+    $pythonLines += '    print(f"Logging in as {smtp_username}...")'
+    $pythonLines += '    server.login(smtp_username, smtp_password)'
+    $pythonLines += '    print("SUCCESS: SMTP connection successful!")'
+    $pythonLines += '    print("")'
+    $pythonLines += '    print("Your emails will be captured in Mailtrap inbox (not actually sent)")'
+    $pythonLines += '    server.quit()'
+    $pythonLines += 'except Exception as e:'
+    $pythonLines += '    print(f"ERROR: {e}")'
+    $pythonLines += '    sys.exit(1)'
     
-    if smtp_use_tls:
-        print("Starting TLS...")
-        server.starttls()
-    
-    print(f"Logging in as {smtp_username}...")
-    server.login(smtp_username, smtp_password)
-    print("SUCCESS: SMTP connection successful!")
-    print("")
-    print("Your emails will be captured in Mailtrap inbox (not actually sent)")
-    server.quit()
-except Exception as e:
-    print(f"ERROR: {e}")
-    sys.exit(1)
-"@
+    $pythonCode = $pythonLines -join [Environment]::NewLine
     
     try {
         Set-Content -Path $tempScript -Value $pythonCode -Encoding UTF8
