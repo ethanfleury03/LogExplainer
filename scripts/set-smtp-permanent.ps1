@@ -2,7 +2,7 @@
 # This script helps you set SMTP configuration that will never change
 
 param(
-    [string]$Host,
+    [string]$SmtpHost,
     [string]$Port = "587",
     [string]$Username,
     [string]$Password,
@@ -43,15 +43,15 @@ if ($Gmail) {
         )
     }
     
-    $Host = "smtp.gmail.com"
+    $SmtpHost = "smtp.gmail.com"
     $Port = "587"
     $FromEmail = $Username
     $FromName = "Arrow Systems Support"
     
 } else {
     # Manual configuration
-    if (-not $Host) {
-        $Host = Read-Host "SMTP Host"
+    if (-not $SmtpHost) {
+        $SmtpHost = Read-Host "SMTP Host"
     }
     if (-not $Port) {
         $Port = Read-Host "SMTP Port (default: 587)"
@@ -76,7 +76,7 @@ if ($Gmail) {
 }
 
 # Validate
-if ([string]::IsNullOrWhiteSpace($Host) -or 
+if ([string]::IsNullOrWhiteSpace($SmtpHost) -or 
     [string]::IsNullOrWhiteSpace($Username) -or 
     [string]::IsNullOrWhiteSpace($Password)) {
     Write-Host ""
@@ -85,7 +85,7 @@ if ([string]::IsNullOrWhiteSpace($Host) -or
 }
 
 # For Gmail, validate App Password format
-if ($Host -eq "smtp.gmail.com") {
+if ($SmtpHost -eq "smtp.gmail.com") {
     # Remove any spaces from password
     $Password = $Password -replace '\s', ''
     
@@ -104,7 +104,7 @@ if ($Host -eq "smtp.gmail.com") {
 $envContent = @"
 # SMTP Configuration (Permanent)
 # DO NOT MODIFY - Set via scripts/set-smtp-permanent.ps1
-SMTP_HOST=$Host
+SMTP_HOST=$SmtpHost
 SMTP_PORT=$Port
 SMTP_USERNAME=$Username
 SMTP_PASSWORD=$Password
@@ -137,7 +137,7 @@ Write-Host ""
 Write-Host "Configuration saved to .env file!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Settings:" -ForegroundColor Cyan
-Write-Host "  SMTP_HOST = $Host" -ForegroundColor Gray
+Write-Host "  SMTP_HOST = $SmtpHost" -ForegroundColor Gray
 Write-Host "  SMTP_PORT = $Port" -ForegroundColor Gray
 Write-Host "  SMTP_USERNAME = $Username" -ForegroundColor Gray
 Write-Host "  SMTP_PASSWORD = [SET]" -ForegroundColor Gray
