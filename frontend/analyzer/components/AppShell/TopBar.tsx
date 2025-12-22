@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { usePathname } from 'next/navigation';
 import { User, IndexStatus } from '@/lib/types';
 import { getIndexStatus } from '@/lib/api/client';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -21,15 +22,23 @@ const statusColors = {
 };
 
 export function TopBar({ user, selectedIndex, onIndexChange }: TopBarProps) {
+  const pathname = usePathname();
   const [indexes, setIndexes] = useState<IndexStatus[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Hide Machine/Index dropdown on Error Debug pages
+  const isErrorDebugPage = pathname?.startsWith('/tech/error-debug') || false;
+
   useEffect(() => {
-    getIndexStatus().then((data) => {
-      setIndexes(data);
+    if (!isErrorDebugPage) {
+      getIndexStatus().then((data) => {
+        setIndexes(data);
+        setLoading(false);
+      });
+    } else {
       setLoading(false);
-    });
-  }, []);
+    }
+  }, [isErrorDebugPage]);
 
   const currentIndex = indexes.find((idx) => idx.id === selectedIndex) || indexes[0];
   const roleBadgeColor = user?.role === 'admin' ? 'bg-purple-500' : user?.role === 'tech' ? 'bg-blue-500' : 'bg-gray-500';
@@ -37,34 +46,36 @@ export function TopBar({ user, selectedIndex, onIndexChange }: TopBarProps) {
   return (
     <div className="h-16 border-b bg-white flex items-center justify-between px-6">
       <div className="flex items-center gap-4">
-        <h1 className="text-xl font-semibold">Error Analyzer</h1>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">Machine/Index:</span>
-          <Select value={selectedIndex} onValueChange={onIndexChange} disabled={loading}>
-            <SelectTrigger className="w-[200px]">
-              <SelectValue>
-                {currentIndex ? (
-                  <div className="flex items-center gap-2">
-                    <span className={cn('w-2 h-2 rounded-full', statusColors[currentIndex.status])} />
-                    {currentIndex.name}
-                  </div>
-                ) : (
-                  'Loading...'
-                )}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {indexes.map((idx) => (
-                <SelectItem key={idx.id} value={idx.id}>
-                  <div className="flex items-center gap-2">
-                    <span className={cn('w-2 h-2 rounded-full', statusColors[idx.status])} />
-                    {idx.name}
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <h1 className="text-xl font-semibold">{isErrorDebugPage ? 'Error Debug' : 'Error Analyzer'}</h1>
+        {!isErrorDebugPage && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Machine/Index:</span>
+            <Select value={selectedIndex} onValueChange={onIndexChange} disabled={loading}>
+              <SelectTrigger className="w-[200px]">
+                <SelectValue>
+                  {currentIndex ? (
+                    <div className="flex items-center gap-2">
+                      <span className={cn('w-2 h-2 rounded-full', statusColors[currentIndex.status])} />
+                      {currentIndex.name}
+                    </div>
+                  ) : (
+                    'Loading...'
+                  )}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {indexes.map((idx) => (
+                  <SelectItem key={idx.id} value={idx.id}>
+                    <div className="flex items-center gap-2">
+                      <span className={cn('w-2 h-2 rounded-full', statusColors[idx.status])} />
+                      {idx.name}
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-3">

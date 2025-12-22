@@ -92,6 +92,19 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     }
   }, [pathname, shouldShow, isErrorDebugArea, mounted]);
 
+  // Handle ?add=1 query param to auto-open Add Machine modal
+  useEffect(() => {
+    if (mounted && shouldShow && pathname === '/tech/error-debug') {
+      // Check URL for ?add=1 query param
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('add') === '1') {
+        setShowAddModal(true);
+        // Remove query param from URL immediately to prevent modal reopening on refresh
+        router.replace('/tech/error-debug', { scroll: false });
+      }
+    }
+  }, [mounted, shouldShow, pathname, router]);
+
 
   const handleCreateMachine = async (e: React.FormEvent) => {
     e.preventDefault();
