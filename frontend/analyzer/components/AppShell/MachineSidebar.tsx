@@ -21,6 +21,7 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const [newMachine, setNewMachine] = useState({
     display_name: '',
     printer_model: '',
@@ -29,8 +30,13 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   const [error, setError] = useState<string | null>(null);
   const [uploadingMachineId, setUploadingMachineId] = useState<string | null>(null);
 
+  // Ensure component only renders on client to avoid hydration mismatch
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   // Check if we should show the sidebar (must be after all hooks)
-  const isErrorDebugArea = pathname?.startsWith('/tech/error-debug') || false;
+  const isErrorDebugArea = mounted && pathname?.startsWith('/tech/error-debug') || false;
   const shouldShow = isErrorDebugArea && user && hasRole(user, 'TECHNICIAN');
 
   // Extract machine ID from pathname if on error-debug page
@@ -74,17 +80,17 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   };
 
   useEffect(() => {
-    if (shouldShow) {
+    if (shouldShow && mounted) {
       loadMachines();
     }
-  }, [shouldShow]);
+  }, [shouldShow, mounted]);
 
   // Refresh machines when pathname changes (e.g., after navigation)
   useEffect(() => {
-    if (shouldShow && isErrorDebugArea) {
+    if (shouldShow && isErrorDebugArea && mounted) {
       loadMachines();
     }
-  }, [pathname, shouldShow, isErrorDebugArea]);
+  }, [pathname, shouldShow, isErrorDebugArea, mounted]);
 
 
   const handleCreateMachine = async (e: React.FormEvent) => {
@@ -150,7 +156,8 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   };
 
   // Early return AFTER all hooks are called
-  if (!shouldShow) {
+  // Also return null during SSR to avoid hydration mismatch
+  if (!mounted || !shouldShow) {
     return null;
   }
 

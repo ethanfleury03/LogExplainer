@@ -9,7 +9,13 @@ import { Card } from '@/components/ui/card';
 
 export default function ErrorDebugPage() {
   const router = useRouter();
-  const user = getCurrentUser();
+  const [mounted, setMounted] = useState(false);
+  
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+  
+  const user = mounted ? getCurrentUser() : null;
   const [machines, setMachines] = useState<Machine[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -22,12 +28,21 @@ export default function ErrorDebugPage() {
     printing_type: '',
   });
 
-  // Check role access
-  if (!user || !hasRole(user, 'TECHNICIAN')) {
+  // Check role access (only after mount to avoid hydration mismatch)
+  if (mounted && (!user || !hasRole(user, 'TECHNICIAN'))) {
     return (
       <div className="p-8">
         <h1 className="text-2xl font-bold mb-4">Access Denied</h1>
         <p>This page is only accessible to TECHNICIAN and ADMIN users.</p>
+      </div>
+    );
+  }
+  
+  // Show loading during SSR/hydration
+  if (!mounted) {
+    return (
+      <div className="p-8">
+        <div className="text-center py-8">Loading...</div>
       </div>
     );
   }
