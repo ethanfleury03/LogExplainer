@@ -567,8 +567,13 @@ def index_codebase(root_path, output_path, include_exts=None, exclude_dirs=None,
         "total_errors": stats['errors_found'],
     }
     
-    # Save index
+    # Save index (create directory if needed)
     try:
+        # Create output directory if it doesn't exist
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        
         with open(output_path, 'wb') as f:
             json_str = json.dumps(index, indent=2, ensure_ascii=False)
             if PY2:
@@ -605,9 +610,17 @@ Examples:
         # Fallback to current working directory
         default_root = os.getcwd()
     
+    # Smart default for --out: use /root/index.json if /root exists, otherwise use script's directory
+    default_out = '/root/index.json'
+    if not os.path.isdir('/root'):
+        # Fallback to script's directory (where ingest.py is located)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        default_out = os.path.join(script_dir, 'index.json')
+    
     parser.add_argument('--root', default=default_root, 
                        help='Root directory to index (default: /opt/memjet if exists, else current directory)')
-    parser.add_argument('--out', default='/root/index.json', help='Output index file path (default: /root/index.json)')
+    parser.add_argument('--out', default=default_out, 
+                       help='Output index file path (default: /root/index.json if /root exists, else ./index.json)')
     parser.add_argument('--include-ext', nargs='+', default=['.py'],
                        help='File extensions to include (default: .py)')
     parser.add_argument('--exclude-dir', nargs='+', default=None,
