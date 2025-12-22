@@ -161,7 +161,7 @@ if ($test -eq "" -or $test -eq "Y" -or $test -eq "y") {
     Write-Host ""
     Write-Host "Testing connection..." -ForegroundColor Yellow
     
-    $testScript = @"
+    $testScript = @'
 import smtplib
 import sys
 import os
@@ -205,7 +205,10 @@ except smtplib.SMTPAuthenticationError as e:
 except Exception as e:
     print(f"ERROR: {e}")
     sys.exit(1)
-"@
+'@
+    
+    # Replace the variable in the script
+    $testScript = $testScript -replace '\$repoRoot', $repoRoot
     
     python -c $testScript
     if ($LASTEXITCODE -eq 0) {

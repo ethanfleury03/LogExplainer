@@ -171,12 +171,35 @@ Then navigate to `http://localhost:3000/tech/error-debug`
 
 ### SMTP Configuration
 
-The setup script will prompt you to configure SMTP. Options:
+**Easiest Option - Mailtrap (Recommended for Development):**
+```powershell
+.\scripts\setup-mailtrap-quick.ps1
+```
+- Free tier available
+- No App Passwords needed
+- No 2FA required
+- Emails are captured (not actually sent) - perfect for testing
+- View emails in web interface at https://mailtrap.io/inboxes
 
-- **Mailtrap** (recommended for development) - sign up at https://mailtrap.io
-- **Gmail** - requires an App Password (generate at https://myaccount.google.com/apppasswords)
+**Gmail Setup (For Production):**
+```powershell
+.\scripts\set-smtp-permanent.ps1 -Gmail
+```
+- Requires App Password (generate at https://myaccount.google.com/apppasswords)
+- Requires 2FA enabled
+- Actually sends emails
 
-You can also skip SMTP setup and configure it later by creating a `.env` file in the root directory.
+**Other SMTP Providers:**
+```powershell
+.\scripts\set-smtp-permanent.ps1
+```
+
+**Verify Configuration:**
+```powershell
+.\scripts\verify-smtp.ps1 -TestConnection
+```
+
+The configuration is saved to `.env` in the root directory and will persist across restarts.
 
 ### Usage
 
