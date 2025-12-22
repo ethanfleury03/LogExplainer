@@ -79,10 +79,12 @@ $envContent = $envLines -join [Environment]::NewLine
 if (Test-Path $envFile) {
     $existingContent = Get-Content $envFile -Raw
     $newline = [Environment]::NewLine
+    # Remove ALL SMTP and INVITE_FROM lines, including comments
     $lines = $existingContent -split $newline | Where-Object { 
-        $_ -notmatch '^SMTP_' -and $_ -notmatch '^INVITE_FROM_' -and $_ -notmatch '^#.*SMTP'
+        $line = $_.Trim()
+        $line -notmatch '^SMTP_' -and $line -notmatch '^INVITE_FROM_' -and $line -notmatch '^#.*SMTP' -and $line -ne ''
     }
-    $otherContent = ($lines | Where-Object { $_.Trim() -ne '' }) -join $newline
+    $otherContent = $lines -join $newline
     
     if ($otherContent) {
         $newContent = $otherContent + $newline + $newline + $envContent
@@ -126,12 +128,16 @@ if ($test -eq "" -or $test -eq "Y" -or $test -eq "y") {
     $pythonLines += ''
     $pythonLines += "repo_root = Path(r'$repoRoot')"
     $pythonLines += "env_file = repo_root / '.env'"
+    $pythonLines += "print(f'Loading .env from: {env_file}')"
+    $pythonLines += "print(f'File exists: {env_file.exists()}')"
     $pythonLines += ''
     $pythonLines += 'if env_file.exists():'
     $pythonLines += '    from dotenv import load_dotenv'
-    $pythonLines += '    load_dotenv(env_file)'
+    $pythonLines += '    load_dotenv(env_file, override=True)'
+    $pythonLines += '    print("Loaded .env file")'
     $pythonLines += ''
     $pythonLines += "smtp_host = os.environ.get('SMTP_HOST')"
+    $pythonLines += "print(f'SMTP_HOST from env: {smtp_host}')"
     $pythonLines += "smtp_port = int(os.environ.get('SMTP_PORT', '587'))"
     $pythonLines += "smtp_username = os.environ.get('SMTP_USERNAME')"
     $pythonLines += "smtp_password = os.environ.get('SMTP_PASSWORD')"
