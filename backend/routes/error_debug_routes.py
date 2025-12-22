@@ -726,6 +726,7 @@ async def email_ingest_script(
     
     # Log configuration status (without sensitive data)
     logger.info(f"SMTP config check: host={'SET' if smtp_host else 'NOT SET'}, username={'SET' if smtp_username else 'NOT SET'}, password={'SET' if smtp_password else 'NOT SET'}")
+    logger.info(f"SMTP details: host={smtp_host}, port={smtp_port}, use_tls={smtp_use_tls}, from={from_email}")
     
     if not smtp_host:
         logger.warning("Email request received but SMTP_HOST not configured")
@@ -740,6 +741,15 @@ async def email_ingest_script(
             status_code=503,
             detail="SMTP credentials incomplete. Both SMTP_USERNAME and SMTP_PASSWORD must be set for Gmail authentication."
         )
+    
+    # For Gmail, validate password format (should be 16 chars, no spaces)
+    if smtp_host == "smtp.gmail.com":
+        password_clean = smtp_password.replace(" ", "")
+        if len(password_clean) != 16:
+            logger.warning(f"Gmail App Password length is {len(password_clean)} (expected 16). May cause authentication issues.")
+        if " " in smtp_password:
+            logger.warning("Gmail App Password contains spaces. Removing spaces...")
+            smtp_password = password_clean
     
     # Read ingest.py file
     ingest_path = os.path.join(os.path.dirname(__file__), '..', '..', 'tools', 'ingest.py')

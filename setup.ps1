@@ -233,13 +233,18 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "  1. Start the backend server:" -ForegroundColor White
-Write-Host "     cd backend" -ForegroundColor Gray
-Write-Host "     python -m uvicorn main:app --reload --port 8000" -ForegroundColor Gray
+Write-Host "     python -m uvicorn backend.main:app --reload --port 8000" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  2. Start the frontend (in another terminal):" -ForegroundColor White
 Write-Host "     cd frontend\analyzer" -ForegroundColor Gray
 Write-Host "     npm run dev" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  3. Open http://localhost:3000 in your browser" -ForegroundColor White
+Write-Host ""
+Write-Host "SMTP Configuration:" -ForegroundColor Yellow
+Write-Host "  If you need to set/update SMTP later:" -ForegroundColor White
+Write-Host "    .\scripts\set-smtp-permanent.ps1 -Gmail" -ForegroundColor Gray
+Write-Host "  To verify SMTP is working:" -ForegroundColor White
+Write-Host "    .\scripts\verify-smtp.ps1 -TestConnection" -ForegroundColor Gray
 Write-Host ""
 
