@@ -139,6 +139,31 @@ The Error Debug feature allows technicians to manage printer machines, upload co
 - Node.js 18+ for frontend
 - PostgreSQL (optional, SQLite fallback available)
 
+### Quick Start (2 Terminals)
+
+**Terminal 1 - Backend:**
+```bash
+cd backend
+pip install -r requirements.txt  # First time only
+python main.py
+# Should see: "Uvicorn running on http://0.0.0.0:8000"
+```
+
+**Terminal 2 - Frontend:**
+```bash
+cd frontend/analyzer
+npm install  # First time only
+
+# Create .env.local if it doesn't exist
+echo NEXT_PUBLIC_API_URL=http://localhost:8000 > .env.local
+echo NEXT_PUBLIC_DEV_AUTH_BYPASS=true >> .env.local
+
+npm run dev
+# Should see: "Ready on http://localhost:3000"
+```
+
+Then navigate to `http://localhost:3000/tech/error-debug`
+
 ### Backend Setup
 
 1. Install dependencies:

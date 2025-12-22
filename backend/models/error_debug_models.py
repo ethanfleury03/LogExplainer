@@ -85,8 +85,19 @@ class Machine(Base):
     active_version_id = Column(GUID(), ForeignKey('error_debug_machine_index_versions.id'), nullable=True)
     
     # Relationship
-    versions = relationship('MachineIndexVersion', back_populates='machine', cascade='all, delete-orphan')
-    active_version = relationship('MachineIndexVersion', foreign_keys=[active_version_id], remote_side='MachineIndexVersion.id', post_update=True)
+    # Explicitly specify foreign_keys to avoid ambiguity (machine_id is the FK, not active_version_id)
+    versions = relationship(
+        'MachineIndexVersion',
+        back_populates='machine',
+        foreign_keys='MachineIndexVersion.machine_id',
+        cascade='all, delete-orphan'
+    )
+    active_version = relationship(
+        'MachineIndexVersion',
+        foreign_keys=[active_version_id],
+        remote_side='MachineIndexVersion.id',
+        post_update=True
+    )
 
 
 class MachineIndexVersion(Base):
