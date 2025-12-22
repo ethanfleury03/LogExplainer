@@ -1,0 +1,55 @@
+Manifest Comparison Report
+================================================================================
+
+Manifest A: .\memjet_PRINTER_A.manifest.jsonl
+Manifest B: .\memjet_PRINTER_B.manifest.jsonl
+Identical: no
+
+Summary:
+  Only in A: 2
+  Only in B: 3
+  Different entries: 3
+
+Only in A (2 entries):
+--------------------------------------------------------------------------------
+  duraflex/data/gymea-data-MJ4.11/common/99-memjet-test_dehydration_mitigation.xml
+    Type: file
+    Size: 12286
+    SHA256: 6223d9c9e72b5ebe86ba6feb11482958d7978a65dfc40c7b6e6eab445e8244b3
+  glenbeigh-images/GNHAMA7010801-1/GlenbeighFW_IKS2-221_GNHAMA7010801-1_IRSNR1-3_20220223-134717.bin
+    Type: file
+    Size: 7010076
+    SHA256: e43f448b5c61422572f79865d712310c4dd5b5de8f29e7619d8a125136fa8a73
+
+Only in B (3 entries):
+--------------------------------------------------------------------------------
+  duraflex/data/gymea-data-MJ4.11/common/certificates/current/pks/PrinterKeyStore_L1022_v1.signed-3305132572.bin
+    Type: file
+    Size: 1613
+    SHA256: 035e2384eeecfbbde2a24bd99ea88bfc51b4ba2c67181d60393b2b51a1e84cb8
+  glenbeigh-images/GNHAMA7010801-1/GlenbeighFW_IKS2-198_GNHAMA7010801-1_IRSNR1-3_20220223-132713.bin
+    Type: file
+    Size: 7010076
+    SHA256: aa26981e300e45089540a7eb087531d28067b6804a31b8bdea947eb822a59af6
+  kareela/data/hwparamstore.json~
+    Type: file
+    Size: 43929
+    SHA256: df8c1edd868cfe3dc0efe4b1c654471c2209ec797bde6e8dea27a9afa426be82
+
+Different entries (3 entries):
+--------------------------------------------------------------------------------
+  kareela/data/hwparamstore.json
+    Differences: size: 43929 vs 43931, sha256: b2636df125dd37bc08d685127dde55e34c8bc0c3b266e238077e1319f20759ea vs 3c01d79f8b02ec5a39e410c3e556f07ed98582a01aa8a63eb7e07a3a40673f5d
+    A: {"path": "kareela/data/hwparamstore.json", "sha256": "b2636df125dd37bc08d685127dde55e34c8bc0c3b266e238077e1319f20759ea", "size": 43929, "type": "file"}
+    B: {"path": "kareela/data/hwparamstore.json", "sha256": "3c01d79f8b02ec5a39e410c3e556f07ed98582a01aa8a63eb7e07a3a40673f5d", "size": 43931, "type": "file"}
+
+  kareela/data/persistedStatus.json
+    Differences: size: 903 vs 910, sha256: 3fc6da88275c7004e2b90599b0cafb92976557c577a88a4099b9f4c2c53b5ff8 vs c866a0429404d8f6806c53583c4f43c78248ff047cafbb32eb79ce6ab5ba0f25
+    A: {"path": "kareela/data/persistedStatus.json", "sha256": "3fc6da88275c7004e2b90599b0cafb92976557c577a88a4099b9f4c2c53b5ff8", "size": 903, "type": "file"}
+    B: {"path": "kareela/data/persistedStatus.json", "sha256": "c866a0429404d8f6806c53583c4f43c78248ff047cafbb32eb79ce6ab5ba0f25", "size": 910, "type": "file"}
+
+  kareela/data/pesSettings.json
+    Differences: sha256: d9251dc8e3d9e0b5976afca8244ea46a2b9f7750adcaecf18cd6fdb57e6b469f vs c34fcdd04504c6a2a4f9dab8a09c6908d1ba8666ef79e06d33e63fd705798ca6
+    A: {"path": "kareela/data/pesSettings.json", "sha256": "d9251dc8e3d9e0b5976afca8244ea46a2b9f7750adcaecf18cd6fdb57e6b469f", "size": 1228, "type": "file"}
+    B: {"path": "kareela/data/pesSettings.json", "sha256": "c34fcdd04504c6a2a4f9dab8a09c6908d1ba8666ef79e06d33e63fd705798ca6", "size": 1228, "type": "file"}
+
