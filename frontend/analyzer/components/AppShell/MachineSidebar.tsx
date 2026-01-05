@@ -47,6 +47,18 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   const libraryMachineId = pathname?.match(/\/library\/([^\/]+)/)?.[1] || null;
   const selectedMachineId = errorDebugMachineId || libraryMachineId;
 
+  // Debug logging for machine selection changes (dev only)
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'development' && mounted && selectedMachineId) {
+      console.log('[MachineSidebar] Machine selection:', {
+        selectedMachineId,
+        source: errorDebugMachineId ? 'error-debug-route' : libraryMachineId ? 'library-route' : 'none',
+        pathname,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedMachineId, mounted]);
+
   // Define loadMachines after computed values (but before useEffect hooks)
   const loadMachines = async () => {
     if (!shouldShow) return; // Don't load if not showing
@@ -148,6 +160,15 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   };
 
   const handleMachineClick = (machineId: string) => {
+    // Debug logging (dev only)
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[MachineSidebar] Machine selection changed -> reason: user_click', {
+        from: selectedMachineId,
+        to: machineId,
+        currentPath: pathname,
+      });
+    }
+
     // Navigate based on current page - keep user on same page type but switch machine
     if (isLibraryArea) {
       // If on library page, navigate to library with machine ID

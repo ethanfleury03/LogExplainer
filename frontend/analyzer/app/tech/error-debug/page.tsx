@@ -22,11 +22,29 @@ export default function ErrorDebugPage() {
       const data = await listMachines();
       setMachines(data);
       
-      // If machines exist and we're on the base /tech/error-debug page (not a specific machine),
-      // redirect to first machine to avoid showing empty state
-      // Only redirect if we're exactly on /tech/error-debug (not a sub-route)
+      // Only redirect if:
+      // 1. We're on the base /tech/error-debug page (not a specific machine or sub-route)
+      // 2. Machines exist
+      // 3. There's no machine ID in the URL already (shouldn't happen, but guard against it)
+      // This ensures we only redirect when truly uninitialized, not when navigating between tabs
       if (data.length > 0 && pathname === '/tech/error-debug') {
-        router.replace(`/tech/error-debug/${data[0].id}`);
+        // Check if there's a machine ID in query params (fallback for edge cases)
+        const urlParams = new URLSearchParams(window.location.search);
+        const machineIdFromQuery = urlParams.get('machine');
+        
+        if (machineIdFromQuery && data.some(m => m.id === machineIdFromQuery)) {
+          // Preserve machine from query param if valid
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[ErrorDebugPage] Redirecting to preserve machine from query param:', machineIdFromQuery);
+          }
+          router.replace(`/tech/error-debug/${machineIdFromQuery}`);
+        } else {
+          // Only redirect to first machine if no valid machine ID found
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[ErrorDebugPage] Redirecting to default machine (no machine ID found):', data[0].id, 'reason: default_init');
+          }
+          router.replace(`/tech/error-debug/${data[0].id}`);
+        }
         return;
       }
     } catch (err: any) {
