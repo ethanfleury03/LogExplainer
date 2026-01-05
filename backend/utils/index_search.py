@@ -170,10 +170,10 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
     Search chunk-based index for error message.
     
     Strategy:
-    1. Exact match: lookup in error_index[normalized_message]
-    2. Fallback: partial match over error_index keys (contains)
-       - Return top 25 keys sorted by (token overlap + length proximity)
-       - Then expand to chunk matches
+    1. Exact match only: lookup in error_index[normalized_message]
+    
+    Only returns results where the normalized query exactly matches an error_index key.
+    No partial matching, substring matching, or token-based matching.
     
     Args:
         error_message: Error message to search for
@@ -192,7 +192,7 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
     results = []
     seen_error_keys = set()
     
-    # Strategy 1: Exact match
+    # Strategy 1: Exact match only
     if normalized_query in error_index:
         for match_info in error_index[normalized_query]:
             chunk_id = match_info.get('chunk_id')
@@ -201,11 +201,8 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
                 if error_key not in seen_error_keys:
                     seen_error_keys.add(error_key)
                     chunk = chunks_dict[chunk_id]
-                    # Extract match excerpt from error message or code
-                    matched_text = error_key  # Use the error message itself as match
-                    if not matched_text:
-                        # Fallback to code excerpt
-                        matched_text = _extract_match_excerpt(error_message, chunk.get('code', ''))
+                    # Use the error message itself as match
+                    matched_text = error_key
                     results.append({
                         'error_key': error_key,
                         'chunks': [chunk],
@@ -214,156 +211,7 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
                         'matched_text': matched_text
                     })
     
-    # Strategy 2: Partial match (if no exact results or need more)
-    if len(results) < 25:
-        query_tokens = normalized_query.split()
-        query_len = len(normalized_query)
-        
-        # Score all keys that contain the query
-        scored_keys = []
-        for error_key, match_list in error_index.items():
-            if error_key in seen_error_keys:
-                continue
-            
-            # Check if query is contained in key
-            if normalized_query in error_key:
-                key_tokens = error_key.split()
-                key_len = len(error_key)
-                
-                # Calculate combined score
-                token_score = _token_overlap_score(query_tokens, key_tokens)
-                length_score = _length_proximity_score(query_len, key_len)
-                combined_score = (token_score * 0.6) + (length_score * 0.4)
-                
-                scored_keys.append((error_key, combined_score, match_list))
-        
-        # Sort by score descending
-        scored_keys.sort(key=lambda x: x[1], reverse=True)
-        
-        # Take top 25
-        for error_key, score, match_list in scored_keys[:25]:
-            if error_key in seen_error_keys:
-                continue
-            
-            seen_error_keys.add(error_key)
-            
-            # Get all chunks for this error key
-            chunks = []
-            for match_info in match_list:
-                chunk_id = match_info.get('chunk_id')
-                if chunk_id and chunk_id in chunks_dict:
-                    chunks.append(chunks_dict[chunk_id])
-            
-            if chunks:
-                # Extract match excerpt from the first chunk's error message or code
-                matched_text = error_key  # Use the error key as match
-                if chunks:
-                    chunk = chunks[0]
-                    # Try to find better excerpt in code if error_key is too generic
-                    code_excerpt = _extract_match_excerpt(error_message, chunk.get('code', ''))
-                    if code_excerpt and len(code_excerpt) > len(matched_text):
-                        matched_text = code_excerpt
-                results.append({
-                    'error_key': error_key,
-                    'chunks': chunks,
-                    'match_type': 'partial',
-                    'score': score,
-                    'matched_text': matched_text
-                })
-    
-    # Strategy 3: Code content search (if no results from error_index)
-    if not results:
-        normalized_query = normalize_error_message(error_message)
-        query_lower = normalized_query.lower()
-        
-        # Filter to significant tokens only
-        query_tokens = _filter_significant_tokens(query_lower.split())
-        
-        # Require at least 2 significant tokens for code search
-        if len(query_tokens) < 2:
-            return results
-        
-        # Search within chunk code content with improved scoring
-        scored_chunks = []
-        for chunk in index_data.get('chunks', []):
-            code = chunk.get('code', '').lower()
-            signature = chunk.get('signature', '').lower()
-            docstring = (chunk.get('docstring', '') or '').lower()
-            leading_comment = (chunk.get('leading_comment', '') or '').lower()
-            error_messages = [e.get('message', '').lower() for e in chunk.get('error_messages', [])]
-            
-            # Priority 1: Check error messages in chunk (highest relevance)
-            error_msg_score = 0.0
-            for error_msg in error_messages:
-                if error_msg:
-                    error_msg_score = max(error_msg_score, _calculate_phrase_match_score(normalized_query, error_msg))
-            
-            # Priority 2: Check code content
-            code_score = _calculate_phrase_match_score(normalized_query, code)
-            
-            # Priority 3: Check docstring and comments (lower relevance)
-            doc_score = _calculate_phrase_match_score(normalized_query, docstring + ' ' + leading_comment)
-            
-            # Combined score with weights
-            # Error messages get highest weight, then code, then docs
-            if error_msg_score > 0:
-                score = error_msg_score * 1.0  # Full weight for error message matches
-            elif code_score > 0:
-                score = code_score * 0.8  # Slightly lower for code matches
-            elif doc_score > 0:
-                score = doc_score * 0.5  # Lower for doc/comment matches
-            else:
-                score = 0.0
-            
-            # Only include chunks with meaningful matches (score >= 0.3)
-            if score >= 0.3:
-                scored_chunks.append((chunk, score))
-        
-        # Sort by score and take top 25
-        scored_chunks.sort(key=lambda x: x[1], reverse=True)
-        
-        if scored_chunks:
-            # Group by file_path for cleaner results
-            file_groups = {}
-            for chunk, score in scored_chunks[:25]:
-                file_path = chunk.get('file_path', 'unknown')
-                if file_path not in file_groups:
-                    file_groups[file_path] = []
-                file_groups[file_path].append((chunk, score))
-            
-            # Create results grouped by file, only include top scoring files
-            sorted_files = sorted(file_groups.items(), key=lambda x: max(c[1] for c in x[1]), reverse=True)
-            for file_path, chunk_scores in sorted_files[:10]:  # Top 10 files by max score
-                chunks = [c[0] for c in chunk_scores]
-                max_score = max(c[1] for c in chunk_scores)
-                # Extract match excerpt from the best matching chunk
-                best_chunk = max(chunk_scores, key=lambda x: x[1])[0]
-                matched_text = ""
-                # Try error messages first
-                for error_msg in best_chunk.get('error_messages', []):
-                    msg = error_msg.get('message', '')
-                    if normalized_query.lower() in msg.lower():
-                        matched_text = msg
-                        break
-                # Fallback to code excerpt
-                if not matched_text:
-                    matched_text = _extract_match_excerpt(error_message, best_chunk.get('code', ''))
-                # If still no match, use a snippet from code
-                if not matched_text and best_chunk.get('code'):
-                    code = best_chunk.get('code', '')
-                    if len(code) > 150:
-                        matched_text = code[:150] + '...'
-                    else:
-                        matched_text = code
-                results.append({
-                    'error_key': f"Code match in {file_path}",
-                    'chunks': chunks,
-                    'match_type': 'code_search',
-                    'score': max_score,
-                    'matched_text': matched_text
-                })
-    
-    # Sort results: exact matches first, then by score
+    # Sort results: exact matches only (already sorted by match_type)
     results.sort(key=lambda x: (x['match_type'] != 'exact', -x['score']))
     
     return results
