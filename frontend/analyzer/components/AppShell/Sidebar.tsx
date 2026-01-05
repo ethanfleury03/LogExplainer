@@ -15,7 +15,7 @@ const navItems = [
   { href: '/tech/error-debug', label: 'Error Debug', icon: Bug, roles: ['ADMIN', 'TECHNICIAN'] as const },
   { href: '/library', label: 'Error Library', icon: BookOpen, roles: ['ADMIN', 'TECHNICIAN'] as const },
   { href: '/index-manager', label: 'Index Manager', icon: Database, roles: ['ADMIN'] as const },
-  { href: '/settings', label: 'Settings', icon: Settings, roles: ['ADMIN', 'TECHNICIAN'] as const },
+  { href: '/tech/error-debug/settings', label: 'Settings', icon: Settings, roles: ['ADMIN', 'TECHNICIAN'] as const },
 ];
 
 export function Sidebar({ user }: SidebarProps) {
@@ -29,7 +29,10 @@ export function Sidebar({ user }: SidebarProps) {
             return null;
           }
 
-          const isActive = pathname === item.href || (item.href !== '/' && pathname?.startsWith(item.href));
+          // Special handling for Settings: active if on any settings route under error-debug
+          const isActive = item.href === '/tech/error-debug/settings'
+            ? pathname?.startsWith('/tech/error-debug') && pathname?.includes('/settings')
+            : pathname === item.href || (item.href !== '/' && pathname?.startsWith(item.href));
           const Icon = item.icon;
 
           return (

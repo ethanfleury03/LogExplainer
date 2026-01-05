@@ -36,12 +36,13 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   }, []);
 
   // Check if we should show the sidebar (computed values)
-  // Show MachineSidebar on Error Debug and Error Library pages (both use machine indexes)
+  // Show MachineSidebar on Error Debug (including settings) and Error Library pages (both use machine indexes)
   const isErrorDebugArea = mounted && pathname?.startsWith('/tech/error-debug') || false;
   const isLibraryArea = mounted && pathname?.startsWith('/library') || false;
   const shouldShow = (isErrorDebugArea || isLibraryArea) && user && hasRole(user, 'TECHNICIAN');
 
-  // Extract machine ID from pathname if on error-debug or library page
+  // Extract machine ID from pathname if on error-debug (including settings) or library page
+  // Pattern: /tech/error-debug/[machineId]/... or /tech/error-debug/[machineId]/settings
   const errorDebugMachineId = pathname?.match(/\/tech\/error-debug\/([^\/]+)/)?.[1] || null;
   const libraryMachineId = pathname?.match(/\/library\/([^\/]+)/)?.[1] || null;
   const selectedMachineId = errorDebugMachineId || libraryMachineId;
@@ -151,7 +152,11 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     if (isLibraryArea) {
       // If on library page, navigate to library with machine ID
       router.push(`/library/${machineId}`);
+    } else if (pathname?.includes('/settings')) {
+      // If on settings page, navigate to settings for the new machine
+      router.push(`/tech/error-debug/${machineId}/settings`);
     } else {
+      // Default: navigate to error debug page for the machine
       router.push(`/tech/error-debug/${machineId}`);
     }
   };

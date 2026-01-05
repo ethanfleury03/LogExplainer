@@ -217,6 +217,8 @@ def _build_function_boundary_map(source_lines, source_text):
         decorator_end_line = None
         in_decorator = False
         decorator_paren_level = 0
+        prev_token_type = None
+        prev_token_line = None
         
         for tok_type, tok_string, tok_start, tok_end, tok_line in tokens:
             line_no = tok_start[0]
@@ -269,24 +271,41 @@ def _build_function_boundary_map(source_lines, source_text):
                     if current_def_line not in boundary_map:
                         boundary_map[current_def_line] = {
                             'end_line_inclusive': last_significant_line or current_def_line,
-                            'decorator_start_line': decorator_start_line,
-                            'decorator_end_line': decorator_end_line,
+                            'decorator_start_line': None,
+                            'decorator_end_line': None,
                             'header_end_line': header_end_line or current_def_line,
                         }
+                    else:
+                        # Update existing entry (decorator info already stored when we saw 'def')
+                        boundary_map[current_def_line]['end_line_inclusive'] = last_significant_line or current_def_line
+                        if header_end_line:
+                            boundary_map[current_def_line]['header_end_line'] = header_end_line
                     current_def_line = None
                     current_def_indent = None
-                    decorator_start_line = None
-                    decorator_end_line = None
                     in_decorator = False
                     decorator_paren_level = 0
             
-            # Detect decorators: '@' at BOL with paren_level==0
-            if tok_type == tokenize.OP and tok_string == '@' and at_bol and paren_level == 0 and bracket_level == 0 and brace_level == 0:
-                if not in_decorator:
-                    decorator_start_line = line_no
-                    in_decorator = True
-                    decorator_paren_level = paren_level
-                decorator_end_line = line_no
+            # Detect decorators: '@' at start of logical line (may be indented)
+            # Decorators appear at the start of a line (after indentation), not inside expressions
+            if (tok_type == tokenize.OP and tok_string == '@' and
+                paren_level == 0 and bracket_level == 0 and brace_level == 0):
+                # Check if '@' is at the start of its line (after indentation)
+                # by examining the source line directly
+                is_at_line_start = False
+                if line_no <= len(source_lines):
+                    line_text = source_lines[line_no - 1]
+                    stripped = line_text.lstrip()
+                    # '@' should be the first non-whitespace character on the line
+                    if stripped.startswith('@'):
+                        is_at_line_start = True
+                
+                # Also check if we're at beginning of logical line (tokenize's at_bol)
+                if is_at_line_start or at_bol:
+                    if not in_decorator:
+                        decorator_start_line = line_no
+                        in_decorator = True
+                        decorator_paren_level = paren_level
+                    decorator_end_line = line_no
             
             # Track decorator continuation (update end line as we process tokens)
             if in_decorator:
@@ -328,24 +347,45 @@ def _build_function_boundary_map(source_lines, source_text):
                         current_def_line = def_line_no
                         current_def_indent = def_indent
                         header_end_line = None
+                        # Store decorator info for this function BEFORE clearing
+                        # (decorators immediately precede this 'def')
+                        saved_decorator_start = decorator_start_line
+                        saved_decorator_end = decorator_end_line
+                        # Initialize boundary map entry for this function with decorator info
+                        boundary_map[def_line_no] = {
+                            'end_line_inclusive': def_line_no,  # Will be updated later
+                            'decorator_start_line': saved_decorator_start,
+                            'decorator_end_line': saved_decorator_end,
+                            'header_end_line': def_line_no,  # Will be updated when we see ':'
+                        }
                         # Stop tracking decorators when we see 'def'
-                        # (decorator info is already captured in decorator_start_line/decorator_end_line)
                         in_decorator = False
                         decorator_paren_level = 0
+                        # Clear decorator tracking for next function
+                        decorator_start_line = None
+                        decorator_end_line = None
             
             # Track header end (line with ':')
             if tok_type == tokenize.OP and tok_string == ':' and current_def_line is not None:
                 if paren_level == 0 and bracket_level == 0 and brace_level == 0:
                     header_end_line = line_no
+                    # Update boundary map with header end line
+                    if current_def_line in boundary_map:
+                        boundary_map[current_def_line]['header_end_line'] = line_no
                     # Decorator block ends when we see the ':' of def
                     if in_decorator:
                         in_decorator = False
             
-            # Track beginning of logical line
+            # Track beginning of logical line and previous token
             if tok_type == tokenize.NEWLINE:
                 at_bol = True
             elif tok_type not in (tokenize.NL, tokenize.COMMENT):
                 at_bol = False
+            
+            # Update previous token tracking
+            if tok_type not in (tokenize.NL, tokenize.COMMENT):
+                prev_token_type = tok_type
+                prev_token_line = line_no
         
         # Finalize any remaining function
         if current_def_line is not None:
@@ -388,9 +428,16 @@ def _slice_lines(lines, start_inclusive, end_inclusive):
     return "\n".join(lines[start_idx:end_idx])
 
 
-def _extract_decorators_from_lines(lines, decorator_start_line, decorator_end_line):
+def _extract_decorators_from_lines(lines, decorator_start_line, decorator_end_line, def_line):
     """
     Extract decorator lines between start and end (inclusive, 1-based).
+    Excludes the def line itself.
+    
+    Args:
+        lines: List of source lines (0-indexed)
+        decorator_start_line: 1-based start line of decorators (or None)
+        decorator_end_line: 1-based end line of decorators (or None)
+        def_line: 1-based def line number (to exclude from decorators)
     
     Returns:
         (decorator_lines: List[str], decorator_block: str|None)
@@ -398,8 +445,18 @@ def _extract_decorators_from_lines(lines, decorator_start_line, decorator_end_li
     if decorator_start_line is None or decorator_end_line is None:
         return [], None
     
-    if decorator_start_line < 1 or decorator_end_line > len(lines):
+    if decorator_start_line < 1:
         return [], None
+    
+    # Ensure decorator_end_line is before def_line
+    if def_line is not None and decorator_end_line >= def_line:
+        decorator_end_line = def_line - 1
+    
+    if decorator_end_line < decorator_start_line:
+        return [], None
+    
+    if decorator_end_line > len(lines):
+        decorator_end_line = len(lines)
     
     decorator_lines = []
     for i in range(decorator_start_line - 1, decorator_end_line):
@@ -778,7 +835,7 @@ def extract_function_chunk(file_path, func_node, source_lines, class_name=None, 
     
     # Extract decorators
     decorator_lines_list, decorator_block = _extract_decorators_from_lines(
-        source_lines, decorator_start_line, decorator_end_line
+        source_lines, decorator_start_line, decorator_end_line, def_line
     )
     
     # Determine start_line_inclusive (leading comment start, or decorator start, or def line)
