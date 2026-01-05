@@ -751,6 +751,199 @@ def _collect_all_errors_from_function(func_node):
     return all_errors, list(log_levels)
 
 
+def _extract_custom_exception_classes(node, file_path, source_lines):
+    """
+    Extract custom exception class definitions from AST.
+    Returns list of dicts with exception class info.
+    Python 2.7.5 compatible.
+    """
+    custom_exceptions = []
+    
+    if isinstance(node, ast.ClassDef):
+        # Check if it's an exception class (inherits from Exception or BaseException)
+        is_exception = False
+        base_classes = []
+        
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                base_name = base.id
+                if 'Exception' in base_name or 'Error' in base_name:
+                    is_exception = True
+                    base_classes.append(base_name)
+            elif isinstance(base, ast.Attribute):
+                # Handle cases like exceptions.Exception
+                if isinstance(base.value, ast.Name):
+                    if base.value.id in ('exceptions', 'Exception', 'BaseException'):
+                        is_exception = True
+                        base_classes.append(base.attr)
+                    elif base.attr in ('Exception', 'BaseException', 'Error'):
+                        is_exception = True
+                        base_classes.append(base.attr)
+        
+        if is_exception:
+            # Extract class info
+            class_name = node.name
+            docstring = _extract_docstring_from_ast(node)
+            
+            # Look for __init__ method to find message template
+            message_template = None
+            for child in node.body:
+                if isinstance(child, ast.FunctionDef) and child.name == '__init__':
+                    # Extract string arguments from __init__ body
+                    for stmt in ast.walk(child):
+                        if isinstance(stmt, ast.Call):
+                            for arg in stmt.args:
+                                str_val = _get_string_value(arg)
+                                if str_val:
+                                    # Check if it looks like an error message
+                                    str_lower = str_val.lower()
+                                    if any(keyword in str_lower for keyword in ['error', 'message', 'msg', 'fail', 'exception']):
+                                        message_template = str_val
+                                        break
+                            if message_template:
+                                break
+                    if message_template:
+                        break
+            
+            # Get line numbers
+            class_line = node.lineno
+            # Estimate end line (class body)
+            class_end_line = class_line
+            if node.body:
+                # Rough estimate: last line of class body
+                class_end_line = node.lineno + len(node.body) * 2
+                class_end_line = min(class_end_line, len(source_lines))
+            
+            custom_exceptions.append({
+                'class_name': class_name,
+                'file_path': file_path,
+                'line_number': class_line,
+                'base_classes': base_classes,
+                'docstring': docstring,
+                'message_template': message_template,
+                'definition': _slice_lines(source_lines, class_line, class_end_line)
+            })
+    
+    return custom_exceptions
+
+
+def _find_custom_exception_usage(node, custom_exception_classes):
+    """
+    Find where custom exception classes are raised.
+    Returns list of dicts with usage info.
+    Python 2.7.5 compatible.
+    """
+    usages = []
+    
+    if isinstance(node, ast.Raise):
+        exc_node = None
+        # Python 2.7: ast.Raise has 'type', 'inst', 'tback'
+        # Python 3: ast.Raise has 'exc', 'cause'
+        if hasattr(node, 'exc'):
+            # Python 3
+            exc_node = node.exc
+        elif hasattr(node, 'inst'):
+            # Python 2.7
+            exc_node = node.inst
+        elif hasattr(node, 'type'):
+            # Python 2.7 alternative
+            exc_node = node.type
+        
+        if exc_node:
+            # Check if it's a custom exception
+            exc_class_name = None
+            if isinstance(exc_node, ast.Call):
+                if isinstance(exc_node.func, ast.Name):
+                    exc_class_name = exc_node.func.id
+                elif isinstance(exc_node.func, ast.Attribute):
+                    exc_class_name = exc_node.func.attr
+            elif isinstance(exc_node, ast.Name):
+                # Just raising the class without calling: raise MyError
+                exc_class_name = exc_node.id
+            
+            # Check if this matches any custom exception
+            if exc_class_name:
+                for exc_info in custom_exception_classes:
+                    if exc_info['class_name'] == exc_class_name:
+                        # Extract message from raise call
+                        message = None
+                        if isinstance(exc_node, ast.Call):
+                            for arg in exc_node.args:
+                                str_val = _get_string_value(arg)
+                                if str_val:
+                                    message = str_val
+                                    break
+                        
+                        usages.append({
+                            'exception_class': exc_class_name,
+                            'message': message,
+                            'line_number': node.lineno,
+                            'file_path': exc_info['file_path']
+                        })
+                        break
+    
+    return usages
+
+
+def _collect_custom_exceptions_from_file(file_path, source_lines, tree):
+    """
+    Collect all custom exception class definitions from a file.
+    Returns list of exception info dicts.
+    """
+    custom_exceptions = []
+    
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            exceptions = _extract_custom_exception_classes(node, file_path, source_lines)
+            custom_exceptions.extend(exceptions)
+    
+    return custom_exceptions
+
+
+def _collect_custom_exception_usages_from_file(file_path, source_lines, tree, custom_exception_classes):
+    """
+    Collect all usages of custom exceptions from a file.
+    Returns list of usage info dicts.
+    """
+    usages = []
+    
+    for node in ast.walk(tree):
+        node_usages = _find_custom_exception_usage(node, custom_exception_classes)
+        usages.extend(node_usages)
+    
+    return usages
+
+
+def build_custom_error_glossary(all_custom_exceptions, all_exception_usages):
+    """
+    Build a glossary of custom exceptions from the index.
+    Returns dict mapping exception class names to their definitions and usages.
+    Python 2.7.5 compatible.
+    
+    Args:
+        all_custom_exceptions: List of custom exception definition dicts
+        all_exception_usages: List of usage dicts (collected during file processing)
+    """
+    glossary = {}
+    
+    # Initialize glossary with definitions
+    for exc_info in all_custom_exceptions:
+        class_name = exc_info['class_name']
+        if class_name not in glossary:
+            glossary[class_name] = {
+                'definition': exc_info,
+                'usages': []
+            }
+    
+    # Add usages to glossary
+    for usage in all_exception_usages:
+        exc_class = usage.get('exception_class')
+        if exc_class and exc_class in glossary:
+            glossary[exc_class]['usages'].append(usage)
+    
+    return glossary
+
+
 def extract_function_chunk(file_path, func_node, source_lines, class_name=None, boundary_map=None, source_text=None):
     """
     Extract function as chunk with full metadata including signature, decorators, and perfect boundaries.
@@ -1041,15 +1234,19 @@ def index_codebase(root_path, output_path, include_exts=None, exclude_dirs=None,
     Returns index dictionary with:
     - chunks: list of all function chunks
     - error_index: mapping from error message -> [chunk_ids]
+    - custom_error_glossary: mapping of custom exception classes to definitions and usages
     - stats: indexing statistics
     """
     chunks = []
     error_index = {}  # error_message -> [chunk_ids]
+    all_custom_exceptions = []  # Collect all custom exception class definitions
+    all_exception_usages = []  # Collect all custom exception usages
     stats = {
         'files_processed': 0,
         'files_failed': 0,
         'functions_found': 0,
         'errors_found': 0,
+        'custom_exceptions_found': 0,
         'start_time': time.time(),
     }
     
@@ -1075,6 +1272,18 @@ def index_codebase(root_path, output_path, include_exts=None, exclude_dirs=None,
             except SyntaxError:
                 stats['files_failed'] += 1
                 continue
+            
+            # Collect custom exception classes from this file
+            file_custom_exceptions = _collect_custom_exceptions_from_file(file_path, source_lines, tree)
+            all_custom_exceptions.extend(file_custom_exceptions)
+            stats['custom_exceptions_found'] += len(file_custom_exceptions)
+            
+            # Collect custom exception usages from this file (need all exceptions found so far)
+            # We'll do a second pass after all files are processed, but collect what we can now
+            file_exception_usages = _collect_custom_exception_usages_from_file(
+                file_path, source_lines, tree, all_custom_exceptions
+            )
+            all_exception_usages.extend(file_exception_usages)
             
             # Build function boundary map using tokenize (with fallback)
             boundary_map = _build_function_boundary_map(source_lines, source)
@@ -1111,12 +1320,51 @@ def index_codebase(root_path, output_path, include_exts=None, exclude_dirs=None,
     
     stats['elapsed_seconds'] = time.time() - stats['start_time']
     
+    # Second pass: Re-scan files to find any usages of exceptions that were defined later
+    # This ensures we catch all usages even if exception was defined after it was used
+    print("Scanning for custom exception usages...", file=sys.stderr)
+    for file_path in safe_walk_files([root_path], include_exts=include_exts,
+                                      exclude_dir_names=exclude_dirs,
+                                      max_file_bytes=max_file_bytes):
+        try:
+            source = _safe_read_file(file_path)
+            if source is None:
+                continue
+            
+            source_lines = source.splitlines()
+            try:
+                tree = ast.parse(source, filename=file_path)
+            except SyntaxError:
+                continue
+            
+            # Find usages with all exceptions now known
+            file_exception_usages = _collect_custom_exception_usages_from_file(
+                file_path, source_lines, tree, all_custom_exceptions
+            )
+            
+            # Add new usages (avoid duplicates)
+            existing_usage_keys = set()
+            for usage in all_exception_usages:
+                key = (usage.get('exception_class'), usage.get('file_path'), usage.get('line_number'))
+                existing_usage_keys.add(key)
+            
+            for usage in file_exception_usages:
+                key = (usage.get('exception_class'), usage.get('file_path'), usage.get('line_number'))
+                if key not in existing_usage_keys:
+                    all_exception_usages.append(usage)
+        except Exception:
+            continue
+    
+    # Build custom error glossary (now that we have all exceptions and usages)
+    custom_error_glossary = build_custom_error_glossary(all_custom_exceptions, all_exception_usages)
+    
     # Build index
     index = {
         "schema_version": "1.0",
         "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         "chunks": chunks,
         "error_index": error_index,
+        "custom_error_glossary": custom_error_glossary,
         "stats": stats,
         "total_chunks": len(chunks),
         "total_errors": stats['errors_found'],
@@ -1217,6 +1465,7 @@ Examples:
         sys.exit(1)
     
     stats = index['stats']
+    custom_glossary = index.get('custom_error_glossary', {})
     print()
     print("=" * 80)
     print("Indexing complete!")
@@ -1224,8 +1473,11 @@ Examples:
     print("  Files failed: {:,}".format(stats['files_failed']))
     print("  Functions found: {:,}".format(stats['functions_found']))
     print("  Errors found: {:,}".format(stats['errors_found']))
+    print("  Custom exceptions found: {:,}".format(stats.get('custom_exceptions_found', 0)))
     print("  Total chunks: {:,}".format(index['total_chunks']))
     print("  Elapsed time: {:.2f} seconds".format(stats['elapsed_seconds']))
+    if custom_glossary:
+        print("  Custom error glossary: {} exception classes".format(len(custom_glossary)))
     print("  Index saved to: {}".format(args.out))
     print("=" * 80)
     
