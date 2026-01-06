@@ -45,21 +45,35 @@ _STOP_WORDS = {
     'can', 'could', 'should', 'would', 'may', 'might', 'must'
 }
 
+# Extended stop words for strong token filtering
+_STRONG_TOKEN_STOPWORDS = {
+    'error', 'failed', 'attempt', 'responses', 'localhost', 'result', 
+    'check', 'get', 'for', 'with', 'from', 'to', 'the', 'and', 'or', 
+    'in', 'on', 'at', 'of'
+}
 
-def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[str, Any]]:
+
+def build_query_candidates(
+    parsed: Dict[str, Any], 
+    raw_query: str,
+    enable_route_filter: bool = False
+) -> List[Dict[str, Any]]:
     """
     Generate multiple deterministic query candidates from parsed log line.
     
     Args:
         parsed: Parsed log dict with route, query_text, component, payload, etc.
         raw_query: Original raw query string (for fallback)
+        enable_route_filter: If True, set allowed_routes on candidates based on parsed route.
+                           If False, never set allowed_routes (search all chunks).
     
     Returns:
         List of candidate dicts, each with:
         - name: string identifier (e.g., "component+message", "message_only")
         - text: string query text
         - weight: float (default 1.0)
-        - route_filter: Optional[str] (inherit from parsed route if confidence >= 0.8)
+        - allowed_routes: Optional[List[str]] (only set if enable_route_filter=True and route detected with confidence >= 0.8)
+        - route_filter: Optional[str] (deprecated, for backward compatibility only)
     """
     candidates = []
     query_text = parsed.get('query_text', '').strip()
@@ -68,10 +82,12 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
     route = parsed.get('route', 'unknown')
     confidence = parsed.get('confidence', 0.0)
     
-    # Determine route filter
-    route_filter = None
-    if route in ('kareela', 'gymea') and confidence >= 0.8:
-        route_filter = route
+    # Determine allowed routes (only if filtering is enabled)
+    allowed_routes = None
+    route_filter = None  # For backward compatibility
+    if enable_route_filter and route in ('kareela', 'gymea') and confidence >= 0.8:
+        allowed_routes = [route, 'unknown']
+        route_filter = route  # Keep for backward compatibility
     
     if not query_text and not payload:
         # Fallback to normalized raw query
@@ -120,7 +136,8 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
             'name': 'message_only',
             'text': message_only,
             'weight': 1.0,
-            'route_filter': route_filter
+            'allowed_routes': allowed_routes,
+            'route_filter': route_filter  # Backward compatibility
         })
     
     # B) component+message candidate (if component exists and not already in query_text)
@@ -132,7 +149,8 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
                 'name': 'component+message',
                 'text': comp_msg_text,
                 'weight': 1.0,
-                'route_filter': route_filter
+                'allowed_routes': allowed_routes,
+                'route_filter': route_filter  # Backward compatibility
             })
     
     # Also add original query_text if not already included
@@ -142,7 +160,8 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
                 'name': 'original_query_text',
                 'text': query_text,
                 'weight': 1.0,
-                'route_filter': route_filter
+                'allowed_routes': allowed_routes,
+                'route_filter': route_filter  # Backward compatibility
             })
     
     # C) core_phrase candidates
@@ -158,7 +177,8 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
                         'name': 'core_phrase',
                         'text': core_phrase,
                         'weight': 0.8,
-                        'route_filter': route_filter
+                        'allowed_routes': allowed_routes,
+                        'route_filter': route_filter  # Backward compatibility
                     })
             
             # Longest 4-8 token tail if message is long
@@ -171,7 +191,8 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
                                 'name': f'core_phrase_tail_{tail_len}',
                                 'text': tail_phrase,
                                 'weight': 0.7,
-                                'route_filter': route_filter
+                                'allowed_routes': allowed_routes,
+                                'route_filter': route_filter  # Backward compatibility
                             })
                             break
     
@@ -196,7 +217,8 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
                         'name': 'bigram',
                         'text': bigram,
                         'weight': 0.6,
-                        'route_filter': route_filter
+                        'allowed_routes': allowed_routes,
+                        'route_filter': route_filter  # Backward compatibility
                     })
             
             # Generate a couple trigrams if message is long enough
@@ -211,9 +233,23 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
                         'name': 'trigram',
                         'text': trigram,
                         'weight': 0.7,
-                        'route_filter': route_filter
+                        'allowed_routes': allowed_routes,
+                        'route_filter': route_filter  # Backward compatibility
                     })
+
+    # F) Strong token candidates (unigrams that look like code identifiers)
+    MAX_STRONG_TOKENS = 8
+    strong_tokens = _extract_strong_tokens(query_text, payload)
     
+    for token in strong_tokens[:MAX_STRONG_TOKENS]:
+        candidates.append({
+            'name': 'strong_token',
+            'text': token,
+            'weight': 0.6,
+            'allowed_routes': allowed_routes,
+            'route_filter': route_filter  # Backward compatibility
+        })
+
     # E) fallback_raw_payload (only if we have no good candidates)
     if not candidates and payload:
         normalized_payload = _normalize_message(payload)
@@ -222,7 +258,8 @@ def build_query_candidates(parsed: Dict[str, Any], raw_query: str) -> List[Dict[
                 'name': 'fallback_raw_payload',
                 'text': normalized_payload,
                 'weight': 0.5,
-                'route_filter': route_filter
+                'allowed_routes': allowed_routes,
+                'route_filter': route_filter  # Backward compatibility
             })
     
     # Deduplicate by exact text
@@ -259,4 +296,77 @@ def _looks_like_part_name(token: str) -> bool:
     if re.match(r'^[A-Z][A-Z0-9_-]+$', token):
         return True
     return False
+
+
+def _extract_strong_tokens(query_text: str, payload: str) -> List[str]:
+    """
+    Extract strong tokens from query_text and payload that look like code identifiers.
+    
+    Rules:
+    - Token length >= 4 OR contains '_' OR contains digits
+    - Exclude stopwords
+    - Keep tokens that look like code identifiers (CamelCase, ALLCAPS, underscores)
+    
+    Returns sorted list (prefer tokens with underscores/ALLCAPS/digits first).
+    """
+    if not query_text and not payload:
+        return []
+    
+    # Combine text sources
+    combined_text = f"{query_text} {payload}".strip()
+    if not combined_text:
+        return []
+    
+    # Extract tokens: split on non-alphanumeric/underscore, preserve case initially
+    tokens_raw = re.findall(r'[A-Za-z0-9_]+', combined_text)
+    
+    strong_tokens = []
+    seen = set()
+    
+    for token in tokens_raw:
+        token_lower = token.lower()
+        
+        # Skip if already seen (case-insensitive)
+        if token_lower in seen:
+            continue
+        
+        # Rule: length >= 4 OR contains '_' OR contains digits
+        has_underscore = '_' in token
+        has_digits = bool(re.search(r'\d', token))
+        is_long_enough = len(token) >= 4
+        
+        if not (is_long_enough or has_underscore or has_digits):
+            continue
+        
+        # Exclude stopwords
+        if token_lower in _STRONG_TOKEN_STOPWORDS:
+            continue
+        
+        # Check if looks like code identifier
+        looks_like_code = (
+            has_underscore or
+            token.isupper() or
+            (token[0].isupper() and any(c.islower() for c in token[1:])) or  # CamelCase
+            has_digits
+        )
+        
+        if looks_like_code or is_long_enough:
+            seen.add(token_lower)
+            # Score for sorting: prefer underscores, ALLCAPS, digits
+            score = 0
+            if has_underscore:
+                score += 3
+            if token.isupper():
+                score += 2
+            if has_digits:
+                score += 1
+            if len(token) >= 8:
+                score += 1
+            
+            strong_tokens.append((score, token_lower))
+    
+    # Sort by score descending, then alphabetically
+    strong_tokens.sort(key=lambda x: (-x[0], x[1]))
+    
+    return [token for _, token in strong_tokens]
 

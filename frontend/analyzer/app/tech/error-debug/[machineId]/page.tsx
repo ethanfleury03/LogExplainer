@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { AiSummaryPanel } from '@/components/AiSummaryPanel';
 
 interface SearchResult {
   error_key: string;
@@ -50,7 +51,22 @@ export default function MachineSearchPage() {
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedChunk, setSelectedChunk] = useState<SearchResult['chunks'][0] | null>(null);
+  const [selectedTab, setSelectedTab] = useState<string>('code');
+  const [isAiSummaryMode, setIsAiSummaryMode] = useState(false);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  const [debugSearchResponse, setDebugSearchResponse] = useState<{
+    parsed?: {
+      route: string;
+      confidence: number;
+      query_text: string;
+      payload?: string;
+      component?: string;
+      severity?: string;
+      tag?: string;
+    };
+    candidates?: Array<{ name: string; text: string; weight: number }>;
+  } | null>(null);
+  const [debugCacheKey, setDebugCacheKey] = useState<string | null>(null);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailAddress, setEmailAddress] = useState('');
@@ -126,19 +142,39 @@ export default function MachineSearchPage() {
     );
   }
 
-  const handleSearch = async () => {
+  const handleSearch = async (includeDebug: boolean = false) => {
     if (!query.trim()) return;
     
     try {
       setSearching(true);
       setError(null);
-      const response = await searchIndex(machineId, query);
+      const response = await searchIndex(machineId, query, includeDebug);
       setResults(response.results);
+      
+      // Store debug data if requested
+      if (includeDebug && response.parsed) {
+        const cacheKey = `${machineId}:${query}`;
+        setDebugSearchResponse({
+          parsed: response.parsed,
+          // Candidates are not currently returned by backend; will be [] for now
+          // TODO: Add candidates to backend response when debug=true
+          candidates: response.debug?.candidates?.map((c: any) => ({
+            name: c.name || '',
+            text: c.text || '',
+            weight: c.weight || 1.0,
+          })) || [],
+        });
+        setDebugCacheKey(cacheKey);
+      }
+      
+      // If in AI Summary mode, keep it open but update the data it would summarize
+      // (preferred behavior: update the view rather than exit)
       
       // Auto-expand first result
       if (response.results.length > 0) {
         setExpandedKeys(new Set([response.results[0].error_key]));
-        if (response.results[0].chunks.length > 0) {
+        if (response.results[0].chunks.length > 0 && !isAiSummaryMode) {
+          // Only auto-select chunk if not in AI Summary mode
           setSelectedChunk(response.results[0].chunks[0]);
         }
       } else {
@@ -159,6 +195,103 @@ export default function MachineSearchPage() {
     } finally {
       setSearching(false);
     }
+  };
+
+  // Fetch debug data when entering AI Summary mode (cached by query + machine_id)
+  const handleEnterAiSummaryMode = async () => {
+    const cacheKey = `${machineId}:${query}`;
+    
+    // If we already have debug data for this query, don't refetch
+    if (debugCacheKey === cacheKey && debugSearchResponse) {
+      setIsAiSummaryMode(true);
+      return;
+    }
+    
+    // Fetch with debug=true
+    if (query.trim()) {
+      try {
+        setSearching(true);
+        const response = await searchIndex(machineId, query, true);
+        
+        setDebugSearchResponse({
+          parsed: response.parsed,
+          // Candidates are not currently returned by backend; will be [] for now
+          // TODO: Add candidates to backend response when debug=true
+          candidates: response.debug?.candidates?.map((c: any) => ({
+            name: c.name || '',
+            text: c.text || '',
+            weight: c.weight || 1.0,
+          })) || [],
+        });
+        setDebugCacheKey(cacheKey);
+        
+        // Update results if they changed
+        if (response.results) {
+          setResults(response.results);
+        }
+      } catch (err: any) {
+        console.error('Failed to fetch debug data:', err);
+        // Continue anyway with existing data
+      } finally {
+        setSearching(false);
+      }
+    }
+    
+    setIsAiSummaryMode(true);
+  };
+
+  // Build the AI payload object
+  const buildAiPayload = () => {
+    const MAX_RESULTS_FOR_AI = 5;
+    const MAX_CHUNKS_PER_RESULT = 2;
+
+    const payload: any = {
+      schema_version: 'ai_summary_v1',
+      generated_at: new Date().toISOString(),
+      machine: {
+        machine_id: machineId,
+        machine_name: machine?.display_name || null,
+        machine_model: machine?.printer_model || null,
+        index_version_id: machine?.active_version?.id || null,
+        index_created_at: machine?.active_version?.indexed_at || null,
+      },
+      query: {
+        raw: query,
+        parsed: debugSearchResponse?.parsed || null,
+        candidates: debugSearchResponse?.candidates || [],
+      },
+      results: [],
+    };
+
+    // Add top results with top chunks
+    const topResults = results.slice(0, MAX_RESULTS_FOR_AI);
+    for (let i = 0; i < topResults.length; i++) {
+      const result = topResults[i];
+      const topChunks = result.chunks.slice(0, MAX_CHUNKS_PER_RESULT);
+      
+      payload.results.push({
+        rank: i + 1,
+        error_key: result.error_key,
+        match_type: result.match_type,
+        score: result.score || 0,
+        matched_text: result.matched_text || null,
+        chunks: topChunks.map((chunk) => ({
+          chunk_id: chunk.chunk_id,
+          file_path: chunk.file_path,
+          function_name: chunk.function_name,
+          class_name: chunk.class_name || null,
+          start_line: chunk.line_start,
+          end_line: chunk.line_end,
+          signature: chunk.signature || null,
+          leading_comment: chunk.leading_comment || null,
+          docstring: chunk.docstring || null,
+          code: chunk.code,
+          route: (chunk as any).route || 'unknown', // Route might not be in frontend type yet
+        })),
+      });
+    }
+
+    return payload;
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -331,12 +464,29 @@ export default function MachineSearchPage() {
             </div>
           </div>
 
-          {results.length > 0 && (
+          {/* Show "Search:" display if query exists (even with zero results) */}
+          {query.trim() && (
             <div>
               <div className="mb-3 p-2 bg-gray-50 rounded border">
                 <div className="text-xs font-medium text-gray-700 mb-1">Search:</div>
                 <div className="text-xs text-gray-900 break-words">{query}</div>
               </div>
+              
+              {/* Generate AI Summary button */}
+              <div className="mb-3 flex justify-center">
+                <Button
+                  onClick={handleEnterAiSummaryMode}
+                  disabled={!query.trim() || searching}
+                  className="w-full"
+                >
+                  Generate AI Summary
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {results.length > 0 && (
+            <div>
               <h3 className="font-medium mb-2">Results ({results.length})</h3>
               <div className="space-y-2">
                 {results.map((result, idx) => (
@@ -394,129 +544,157 @@ export default function MachineSearchPage() {
           )}
         </div>
 
-        {/* Middle: Results list (if needed) */}
-        <div className="w-1/3 border-r p-4 overflow-y-auto">
-          {selectedChunk ? (
-            <div>
-              <h3 className="font-medium mb-2">Selected Function</h3>
-              <div className="text-sm">
-                <div className="mb-2">
-                  <span className="font-medium">Function:</span> {selectedChunk.function_name}
-                </div>
-                {selectedChunk.class_name && (
-                  <div className="mb-2">
-                    <span className="font-medium">Class:</span> {selectedChunk.class_name}
+        {/* Conditional rendering: AI Summary View OR normal two-panel view */}
+        {/* Key prop resets summary state when query changes */}
+        {isAiSummaryMode ? (
+          <AiSummaryPanel
+            key={`${machineId}:${query}`}
+            query={query}
+            results={results}
+            payload={buildAiPayload()}
+            onBack={() => setIsAiSummaryMode(false)}
+          />
+        ) : (
+          <>
+            {/* Middle: Selected Function panel */}
+            <div className="w-1/3 border-r p-4 overflow-y-auto">
+              {selectedChunk ? (
+                <div>
+                  <h3 className="font-medium mb-2">Selected Function</h3>
+                  <div className="text-sm">
+                    <div className="mb-2">
+                      <span className="font-medium">Function:</span> {selectedChunk.function_name}
+                    </div>
+                    {selectedChunk.class_name && (
+                      <div className="mb-2">
+                        <span className="font-medium">Class:</span> {selectedChunk.class_name}
+                      </div>
+                    )}
+                    <div className="mb-2">
+                      <span className="font-medium">File:</span> {selectedChunk.file_path}
+                    </div>
+                    <div className="mb-2">
+                      <span className="font-medium">Lines:</span> {selectedChunk.line_start}-
+                      {selectedChunk.line_end}
+                    </div>
+                    {selectedChunk.signature && (
+                      <div className="mb-2">
+                        <span className="font-medium">Signature:</span>
+                        <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-x-auto">
+                          {selectedChunk.signature}
+                        </pre>
+                      </div>
+                    )}
                   </div>
-                )}
-                <div className="mb-2">
-                  <span className="font-medium">File:</span> {selectedChunk.file_path}
                 </div>
-                <div className="mb-2">
-                  <span className="font-medium">Lines:</span> {selectedChunk.line_start}-
-                  {selectedChunk.line_end}
+              ) : (
+                <div className="text-gray-500 text-center py-8">
+                  Select a chunk from the results to view details
                 </div>
-                {selectedChunk.signature && (
-                  <div className="mb-2">
-                    <span className="font-medium">Signature:</span>
-                    <pre className="text-xs bg-gray-100 p-2 rounded mt-1 overflow-x-auto">
-                      {selectedChunk.signature}
-                    </pre>
-                  </div>
-                )}
-              </div>
+              )}
             </div>
-          ) : (
-            <div className="text-gray-500 text-center py-8">
-              Select a chunk from the results to view details
-            </div>
-          )}
-        </div>
 
-        {/* Right: Details pane */}
-        <div className="w-1/3 p-4 overflow-y-auto">
-          {selectedChunk ? (
-            <Tabs defaultValue="code">
-              <TabsList>
-                <TabsTrigger value="summary">Summary</TabsTrigger>
-                <TabsTrigger value="code">Code</TabsTrigger>
-                <TabsTrigger value="metadata">Metadata</TabsTrigger>
-                <TabsTrigger value="raw">Raw</TabsTrigger>
-              </TabsList>
-              <TabsContent value="summary" className="mt-4">
-                <div className="space-y-2 text-sm">
-                  <div>
-                    <span className="font-medium">Function:</span> {selectedChunk.function_name}
-                  </div>
-                  {selectedChunk.class_name && (
-                    <div>
-                      <span className="font-medium">Class:</span> {selectedChunk.class_name}
+            {/* Right: Details pane with tabs */}
+            <div className="w-1/3 p-4 overflow-y-auto">
+              {selectedChunk ? (
+                <Tabs value={selectedTab} onValueChange={setSelectedTab}>
+                  <TabsList>
+                    <TabsTrigger value="summary">Summary</TabsTrigger>
+                    <TabsTrigger value="ai-summary">AI Summary</TabsTrigger>
+                    <TabsTrigger value="code">Code</TabsTrigger>
+                    <TabsTrigger value="metadata">Metadata</TabsTrigger>
+                    <TabsTrigger value="raw">Raw</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="summary" className="mt-4">
+                    <div className="space-y-2 text-sm">
+                      <div>
+                        <span className="font-medium">Function:</span> {selectedChunk.function_name}
+                      </div>
+                      {selectedChunk.class_name && (
+                        <div>
+                          <span className="font-medium">Class:</span> {selectedChunk.class_name}
+                        </div>
+                      )}
+                      <div>
+                        <span className="font-medium">File:</span> {selectedChunk.file_path}
+                      </div>
+                      <div>
+                        <span className="font-medium">Location:</span> Lines {selectedChunk.line_start}-
+                        {selectedChunk.line_end}
+                      </div>
+                      {selectedChunk.docstring && (
+                        <div>
+                          <span className="font-medium">Docstring:</span>
+                          <pre className="text-xs bg-gray-100 p-2 rounded mt-1 whitespace-pre-wrap">
+                            {selectedChunk.docstring}
+                          </pre>
+                        </div>
+                      )}
+                      {selectedChunk.error_messages.length > 0 && (
+                        <div>
+                          <span className="font-medium">Error Messages:</span>
+                          <ul className="list-disc list-inside mt-1">
+                            {selectedChunk.error_messages.map((err, idx) => (
+                              <li key={idx} className="text-xs">
+                                {err.message} ({err.log_level}, {err.source_type})
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
-                  )}
-                  <div>
-                    <span className="font-medium">File:</span> {selectedChunk.file_path}
-                  </div>
-                  <div>
-                    <span className="font-medium">Location:</span> Lines {selectedChunk.line_start}-
-                    {selectedChunk.line_end}
-                  </div>
-                  {selectedChunk.docstring && (
-                    <div>
-                      <span className="font-medium">Docstring:</span>
-                      <pre className="text-xs bg-gray-100 p-2 rounded mt-1 whitespace-pre-wrap">
-                        {selectedChunk.docstring}
-                      </pre>
+                  </TabsContent>
+                  <TabsContent value="ai-summary" className="mt-4">
+                    <div className="space-y-4">
+                      <div>
+                        <h3 className="font-semibold text-lg mb-2">AI Summary</h3>
+                        <p className="text-sm text-muted-foreground">
+                          AI summary is not configured yet.
+                        </p>
+                      </div>
+                      <Button disabled variant="outline">
+                        Generate Summary
+                      </Button>
                     </div>
-                  )}
-                  {selectedChunk.error_messages.length > 0 && (
-                    <div>
-                      <span className="font-medium">Error Messages:</span>
-                      <ul className="list-disc list-inside mt-1">
-                        {selectedChunk.error_messages.map((err, idx) => (
-                          <li key={idx} className="text-xs">
-                            {err.message} ({err.log_level}, {err.source_type})
-                          </li>
-                        ))}
-                      </ul>
+                  </TabsContent>
+                  <TabsContent value="code" className="mt-4">
+                    <pre className="text-xs bg-gray-100 p-4 rounded overflow-x-auto">
+                      {selectedChunk.code}
+                    </pre>
+                  </TabsContent>
+                  <TabsContent value="metadata" className="mt-4">
+                    <div className="space-y-2 text-sm">
+                      <div>
+                        <span className="font-medium">Chunk ID:</span> {selectedChunk.chunk_id}
+                      </div>
+                      <div>
+                        <span className="font-medium">Log Levels:</span>{' '}
+                        {selectedChunk.log_levels.join(', ') || 'None'}
+                      </div>
+                      {selectedChunk.leading_comment && (
+                        <div>
+                          <span className="font-medium">Leading Comment:</span>
+                          <pre className="text-xs bg-gray-100 p-2 rounded mt-1 whitespace-pre-wrap">
+                            {selectedChunk.leading_comment}
+                          </pre>
+                        </div>
+                      )}
                     </div>
-                  )}
+                  </TabsContent>
+                  <TabsContent value="raw" className="mt-4">
+                    <pre className="text-xs bg-gray-100 p-4 rounded overflow-x-auto">
+                      {JSON.stringify(selectedChunk, null, 2)}
+                    </pre>
+                  </TabsContent>
+                </Tabs>
+              ) : (
+                <div className="text-gray-500 text-center py-8">
+                  No chunk selected
                 </div>
-              </TabsContent>
-              <TabsContent value="code" className="mt-4">
-                <pre className="text-xs bg-gray-100 p-4 rounded overflow-x-auto">
-                  {selectedChunk.code}
-                </pre>
-              </TabsContent>
-              <TabsContent value="metadata" className="mt-4">
-                <div className="space-y-2 text-sm">
-                  <div>
-                    <span className="font-medium">Chunk ID:</span> {selectedChunk.chunk_id}
-                  </div>
-                  <div>
-                    <span className="font-medium">Log Levels:</span>{' '}
-                    {selectedChunk.log_levels.join(', ') || 'None'}
-                  </div>
-                  {selectedChunk.leading_comment && (
-                    <div>
-                      <span className="font-medium">Leading Comment:</span>
-                      <pre className="text-xs bg-gray-100 p-2 rounded mt-1 whitespace-pre-wrap">
-                        {selectedChunk.leading_comment}
-                      </pre>
-                    </div>
-                  )}
-                </div>
-              </TabsContent>
-              <TabsContent value="raw" className="mt-4">
-                <pre className="text-xs bg-gray-100 p-4 rounded overflow-x-auto">
-                  {JSON.stringify(selectedChunk, null, 2)}
-                </pre>
-              </TabsContent>
-            </Tabs>
-          ) : (
-            <div className="text-gray-500 text-center py-8">
-              No chunk selected
+              )}
             </div>
-          )}
-        </div>
+          </>
+        )}
       </div>
 
       {/* Upload Modal */}

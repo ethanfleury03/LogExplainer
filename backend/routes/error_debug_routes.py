@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Body, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -27,6 +27,7 @@ from backend.utils.index_storage import save_index_file, load_index_file, delete
 from backend.utils.index_search import search_chunk_index, search_chunk_index_multi
 from backend.utils.log_parser import parse_log_line
 from backend.utils.query_candidates import build_query_candidates
+from backend.utils.anthropic_client import call_claude_messages
 
 router = APIRouter(prefix="/api/error-debug", tags=["error-debug"])
 
@@ -693,25 +694,57 @@ async def search_index(
         f"query_text='{normalized_query[:60]}{'...' if len(normalized_query) > 60 else ''}'"
     )
     
-    # Apply route filter if confidence is high enough
-    route_filter = None
-    if route in ('kareela', 'gymea') and confidence >= 0.8:
-        route_filter = route
-        logger.info(f"Route filter will be applied: {route_filter}")
-    else:
-        logger.info(f"No route filter (route={route}, confidence={confidence:.2f})")
+    # Check if route filtering is enabled via environment variable (default: False)
+    enable_route_filter = os.getenv("ERROR_DEBUG_ENABLE_ROUTE_FILTER", "false").lower() in ("true", "1", "yes")
     
-    # Generate query candidates
+    # Determine allowed routes (only if filtering is enabled)
+    # When disabled, always search all chunks regardless of detected route
+    allowed_routes = None
+    would_have_filtered = None  # For logging when filtering is disabled
+    
+    if enable_route_filter:
+        # Old behavior: filter by route when enabled
+        if route in ('kareela', 'gymea') and confidence >= 0.8:
+            allowed_routes = [route, 'unknown']
+            logger.info(f"Route filtering ENABLED: applying filter routes={allowed_routes}")
+        else:
+            if route == 'unknown':
+                logger.info(f"Route filtering ENABLED: no filter (route={route} is unknown)")
+            elif confidence < 0.8:
+                logger.info(f"Route filtering ENABLED: no filter (route={route}, confidence={confidence:.2f} < 0.8)")
+            else:
+                logger.info(f"Route filtering ENABLED: no filter (route={route}, confidence={confidence:.2f})")
+    else:
+        # New behavior: logging-only, no filtering
+        if route in ('kareela', 'gymea') and confidence >= 0.8:
+            would_have_filtered = [route, 'unknown']
+            logger.info(
+                f"Route filtering DISABLED: would have filtered routes={would_have_filtered} (not applied) - "
+                f"searching all chunks"
+            )
+        else:
+            logger.info(
+                f"Route filtering DISABLED: route={route}, confidence={confidence:.2f} - "
+                f"searching all chunks (no filter would have been applied anyway)"
+            )
+    
+    # Generate query candidates (pass enable_route_filter flag)
     try:
-        candidates = build_query_candidates(parsed, query_text)
+        candidates = build_query_candidates(parsed, query_text, enable_route_filter=enable_route_filter)
         logger.info(f"Generated {len(candidates)} query candidates")
         
         if debug:
             logger.debug("Query candidates:")
             for i, cand in enumerate(candidates, 1):
+                # Show what would have been applied (for debugging)
+                cand_allowed_routes = cand.get('allowed_routes') or cand.get('route_filter') or allowed_routes
+                if not enable_route_filter and cand_allowed_routes:
+                    allowed_routes_display = f"{cand_allowed_routes} (not applied - filtering disabled)"
+                else:
+                    allowed_routes_display = cand_allowed_routes
                 logger.debug(
                     f"  {i}. {cand['name']}: '{cand['text'][:60]}{'...' if len(cand['text']) > 60 else ''}' "
-                    f"(weight={cand['weight']:.1f}, route_filter={cand.get('route_filter')})"
+                    f"(weight={cand['weight']:.1f}, allowed_routes={allowed_routes_display})"
                 )
     except Exception as e:
         logger.warning(f"Error generating query candidates, falling back to single query: {e}", exc_info=True)
@@ -721,8 +754,13 @@ async def search_index(
     debug_info = None
     if candidates and len(candidates) > 0:
         try:
-            # Use route_filter from parsed (can be overridden per candidate)
-            results, debug_info = search_chunk_index_multi(candidates, index_data, route_filter=route_filter)
+            # Pass enable_route_filter to multi-candidate search
+            results, debug_info = search_chunk_index_multi(
+                candidates, 
+                index_data, 
+                allowed_routes=allowed_routes,
+                enable_route_filter=enable_route_filter
+            )
             
             # Log candidate stats
             logger.info("Candidate search stats:")
@@ -730,11 +768,20 @@ async def search_index(
                 if 'error' in stat:
                     logger.warning(f"  {stat['name']}: ERROR - {stat['error']}")
                 else:
+                    # Include candidate text in log (truncate to 80 chars)
+                    candidate_text = stat.get('text', '')
+                    text_display = candidate_text[:80] + ('...' if len(candidate_text) > 80 else '')
+                    match_types = stat['match_counts']
+                    match_str = (
+                        f"exact:{match_types.get('exact', 0)}/"
+                        f"partial:{match_types.get('partial', 0)}/"
+                        f"code:{match_types.get('code_search', 0)}"
+                    )
+                    if match_types.get('token_overlap', 0) > 0:
+                        match_str += f"/token_overlap:{match_types.get('token_overlap', 0)}"
                     logger.info(
-                        f"  {stat['name']}: {stat['total_results']} results "
-                        f"(exact:{stat['match_counts'].get('exact', 0)}/"
-                        f"partial:{stat['match_counts'].get('partial', 0)}/"
-                        f"code:{stat['match_counts'].get('code_search', 0)})"
+                        f"  {stat['name']}(\"{text_display}\"): {stat['total_results']} results "
+                        f"({match_str})"
                     )
             
             # Log merge summary
@@ -762,11 +809,21 @@ async def search_index(
         except Exception as e:
             logger.error(f"Error in multi-candidate search, falling back to single query: {e}", exc_info=True)
             # Fallback to single query
-            results = search_chunk_index(normalized_query, index_data, route_filter=route_filter)
+            results = search_chunk_index(
+                normalized_query, 
+                index_data, 
+                allowed_routes=allowed_routes,
+                enable_route_filter=enable_route_filter
+            )
     else:
         # Fallback to single query search
         logger.info("Using single-query search (no candidates or candidate generation failed)")
-        results = search_chunk_index(normalized_query, index_data, route_filter=route_filter)
+        results = search_chunk_index(
+            normalized_query, 
+            index_data, 
+            allowed_routes=allowed_routes,
+            enable_route_filter=enable_route_filter
+        )
     
     elapsed_ms = int((time.time() - start_time) * 1000)
     match_types = {'exact': 0, 'partial': 0, 'code_search': 0}
@@ -801,6 +858,167 @@ async def search_index(
         response["debug"] = debug_info
     
     return response
+
+
+# AI Summary Route
+
+@router.post("/ai-summary")
+async def generate_ai_summary(
+    payload: dict = Body(...),
+    debug: bool = Query(False),
+    user: DevUser = Depends(require_role)
+):
+    """
+    Generate AI summary using Claude for a query and its search results.
+    
+    Accepts the ai_summary_v1 payload and returns a structured summary.
+    """
+    import time
+    start_time = time.time()
+    
+    logger.info(f"AI Summary request: user={user.email}, debug={debug}")
+    
+    try:
+        # Validate payload schema
+        schema_version = payload.get("schema_version")
+        if schema_version != "ai_summary_v1":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid schema_version: expected 'ai_summary_v1', got '{schema_version}'"
+            )
+        
+        query_raw = payload.get("query", {}).get("raw")
+        if not query_raw:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: query.raw"
+            )
+        
+        # Truncate code fields to prevent oversized prompts
+        MAX_CODE_LENGTH = 6000
+        truncated_payload = _truncate_code_fields(payload, MAX_CODE_LENGTH)
+        
+        # Build prompt
+        prompt = _build_summary_prompt(truncated_payload)
+        
+        # Get model from env or use default
+        model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+        max_tokens = int(os.getenv("ANTHROPIC_MAX_TOKENS", "800"))
+        
+        logger.debug(f"Calling Claude: model={model}, prompt_length={len(prompt)}")
+        
+        # Call Claude
+        raw_response = call_claude_messages(
+            prompt_text=prompt,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=0.2
+        )
+        
+        logger.debug(f"Claude raw response length: {len(raw_response)} chars")
+        if debug:
+            logger.debug(f"Claude raw response (first 500 chars): {raw_response[:500]}")
+        
+        # Parse JSON response
+        try:
+            summary_json = json.loads(raw_response.strip())
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Claude JSON response: {e}")
+            logger.debug(f"Raw response (first 500 chars): {raw_response[:500]}")
+            
+            # Return error with raw response if debug=true
+            error_detail = {
+                "error": "Failed to parse Claude response as JSON",
+                "error_type": "json_parse_error"
+            }
+            if debug:
+                error_detail["raw_response_truncated"] = raw_response[:500]
+            
+            raise HTTPException(status_code=502, detail=error_detail)
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        
+        logger.info(f"AI Summary generated successfully: elapsed_ms={elapsed_ms}")
+        
+        return {
+            "ok": True,
+            "summary": summary_json,
+            "meta": {
+                "model": model,
+                "elapsed_ms": elapsed_ms,
+                "tokens": None  # Anthropic API doesn't return token count in this response format
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # API key missing or similar config error
+        logger.error(f"Configuration error in AI Summary: {e}")
+        raise HTTPException(status_code=500, detail=f"AI service configuration error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error generating AI Summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate AI summary: {str(e)}")
+
+
+def _truncate_code_fields(payload: dict, max_length: int) -> dict:
+    """Truncate code fields in payload to prevent oversized prompts."""
+    import copy
+    truncated = copy.deepcopy(payload)
+    
+    results = truncated.get("results", [])
+    for result in results:
+        chunks = result.get("chunks", [])
+        for chunk in chunks:
+            if "code" in chunk and chunk["code"]:
+                code = chunk["code"]
+                if len(code) > max_length:
+                    truncated_code = code[:max_length] + f"\n... [truncated {len(code) - max_length} chars]"
+                    chunk["code"] = truncated_code
+                    logger.debug(f"Truncated code field: {len(code)} -> {len(truncated_code)} chars")
+    
+    return truncated
+
+
+def _build_summary_prompt(payload: dict) -> str:
+    """Build the prompt for Claude to generate a summary."""
+    payload_json = json.dumps(payload, indent=2)
+    
+    prompt = """You are assisting a field technician debugging printer logs. Use ONLY the provided payload data to generate a structured summary. If evidence is insufficient, say so clearly and set confidence to "low".
+
+Return ONLY valid JSON matching this exact schema. No markdown formatting. No code blocks. No extra text before or after the JSON.
+
+Schema:
+{
+  "what_it_means": "string - A clear, concise explanation of what this error message means in plain language",
+  "most_likely_cause": "string - The most likely root cause based on the code and error context",
+  "what_to_check": ["step 1", "step 2", "step 3"] - An array of 3-5 actionable troubleshooting steps,
+  "where_in_code": [
+    {
+      "file_path": "relative/path/to/file.py",
+      "lines": "start-end or null",
+      "symbol": "function_or_class_name",
+      "why": "short reason why this location is relevant"
+    }
+  ] - An array of 1-3 relevant code locations,
+  "confidence": {
+    "level": "high|medium|low",
+    "why": "string explaining why this confidence level"
+  }
+}
+
+Important:
+- "what_to_check" should be practical troubleshooting steps the technician can perform
+- "where_in_code" should reference actual files/symbols from the payload results
+- "confidence.level" should reflect how much evidence is available in the payload
+- If code fields are truncated or missing, note that in confidence.why
+- Keep all strings concise and actionable
+
+Payload data:
+"""
+    prompt += payload_json
+    
+    return prompt
 
 
 # Email Script Route

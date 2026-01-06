@@ -6,9 +6,208 @@ Searches pre-indexed codebase chunks for error messages.
 
 import re
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union, Set
 
 logger = logging.getLogger(__name__)
+
+# Stop words for token overlap search (expanded with domain generic terms)
+_TOKEN_STOPWORDS = {
+    'error', 'failed', 'attempt', 'responses', 'check', 'instead', 'home',
+    'localhost', 'endpoint', 'properties', 'supported', 'result', 'driver',
+    'state', 'starting', 'finished', 'completed', 'changing', 'response',
+    'request', 'get', 'set', 'reset', 'from', 'with', 'that', 'this',
+    'then', 'than', 'into', 'over', 'under', 'not', 'for', 'to', 'the',
+    'and', 'or', 'in', 'on', 'at', 'of', 'a', 'an', 'are', 'as', 'be',
+    'by', 'has', 'he', 'is', 'it', 'its', 'was', 'will', 'these', 'they',
+    'them', 'their', 'there'
+}
+
+
+def _extract_strong_tokens(text: str) -> Set[str]:
+    """
+    Extract strong tokens (identifier-like) from text.
+    
+    Strong tokens are:
+    - Contains '_' OR digits OR length>=5 (not in stopwords) OR has camelcase in raw payload
+    
+    Examples: result_dev_err, gymeamux, getvcs, mmcap, lifter, vc, cyan
+    
+    Returns set of strong token strings (lowercased).
+    """
+    if not text:
+        return set()
+    
+    # Preserve case initially to detect CamelCase
+    tokens_raw = re.findall(r'[A-Za-z0-9_]+', text)
+    
+    strong_tokens = set()
+    seen = set()
+    
+    for token in tokens_raw:
+        token_lower = token.lower()
+        
+        if token_lower in seen or token_lower in _TOKEN_STOPWORDS:
+            continue
+        
+        # Check if strong token criteria
+        has_underscore = '_' in token
+        has_digits = bool(re.search(r'\d', token))
+        is_long_enough = len(token) >= 5
+        has_camelcase = len(token) > 1 and token[0].isupper() and any(c.islower() for c in token[1:])
+        
+        if has_underscore or has_digits or (is_long_enough and token_lower not in _TOKEN_STOPWORDS) or has_camelcase:
+            strong_tokens.add(token_lower)
+            seen.add(token_lower)
+    
+    return strong_tokens
+
+
+def _tokenize_for_overlap(text: str) -> Set[str]:
+    """
+    Tokenize text for token overlap search.
+    
+    Rules:
+    - Lowercase
+    - Split on non-alphanumeric/underscore
+    - Keep tokens: len>=4 OR contains '_' OR contains digits
+    - Remove stopwords
+    
+    Returns set of token strings.
+    """
+    if not text:
+        return set()
+    
+    # Split on non-alphanumeric/underscore
+    tokens = re.findall(r'[A-Za-z0-9_]+', text.lower())
+    
+    result = set()
+    for token in tokens:
+        # Keep if: len>=4 OR contains '_' OR contains digits
+        has_underscore = '_' in token
+        has_digits = bool(re.search(r'\d', token))
+        is_long_enough = len(token) >= 4
+        
+        if (is_long_enough or has_underscore or has_digits) and token not in _TOKEN_STOPWORDS:
+            result.add(token)
+    
+    return result
+
+
+def _token_overlap_search(
+    candidate_text: str,
+    chunks_dict: Dict[str, Any],
+    seen_chunk_ids: Set[str],
+    seen_error_keys: Set[str],
+    candidate_strong_tokens: Optional[Set[str]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Token overlap search: find chunks where token sets overlap.
+    
+    Args:
+        candidate_text: Query text to search for
+        chunks_dict: Dict of chunk_id -> chunk
+        seen_chunk_ids: Set of chunk IDs already included (to avoid duplicates)
+        seen_error_keys: Set of error keys already included
+        candidate_strong_tokens: Optional set of strong tokens from candidate (for gating)
+    
+    Returns:
+        List of result dicts with match_type='token_overlap'
+    """
+    # Tokenize candidate text
+    candidate_tokens = _tokenize_for_overlap(candidate_text)
+    
+    if not candidate_tokens:
+        return []
+    
+    # Extract strong tokens from candidate if not provided
+    if candidate_strong_tokens is None:
+        candidate_strong_tokens = _extract_strong_tokens(candidate_text)
+    
+    results = []
+    
+    for chunk_id, chunk in chunks_dict.items():
+        # Skip if already included
+        if chunk_id in seen_chunk_ids:
+            continue
+        
+        # Build searchable text from chunk fields
+        signature = chunk.get('signature', '') or ''
+        leading_comment = chunk.get('leading_comment', '') or ''
+        docstring = chunk.get('docstring', '') or ''
+        code = chunk.get('code', '') or ''
+        
+        # Also check error_key from error_messages if available
+        error_key_parts = []
+        for err_msg in chunk.get('error_messages', []):
+            error_key_parts.append(err_msg.get('message', ''))
+        
+        searchable_text = ' '.join([
+            signature,
+            leading_comment,
+            docstring,
+            code,
+            ' '.join(error_key_parts)
+        ])
+        
+        # Tokenize chunk text
+        chunk_tokens = _tokenize_for_overlap(searchable_text)
+        
+        # Extract strong tokens from chunk
+        chunk_strong_tokens = _extract_strong_tokens(searchable_text)
+        
+        # Calculate overlap
+        overlap = candidate_tokens & chunk_tokens
+        
+        # Calculate strong token overlap
+        overlap_strong = candidate_strong_tokens & chunk_strong_tokens
+        
+        # Gating: require strong token overlap
+        # Accept chunk only if:
+        # (len(overlap_strong) >= 1 AND len(overlap) >= 2) OR (len(overlap_strong) >= 2)
+        if not ((len(overlap_strong) >= 1 and len(overlap) >= 2) or (len(overlap_strong) >= 2)):
+            continue
+        
+        # Calculate score: prioritize strong tokens
+        # score = min(0.6, 0.12 * len(overlap_strong) + 0.03 * (len(overlap) - len(overlap_strong)))
+        base_score = min(0.6, 0.12 * len(overlap_strong) + 0.03 * max(0, len(overlap) - len(overlap_strong)))
+        
+        # Build matched_text showing overlapping tokens (prioritize strong tokens)
+        overlap_list = sorted(list(overlap))
+        overlap_strong_list = sorted(list(overlap_strong))
+        if len(overlap_strong_list) > 0:
+            if len(overlap_strong_list) <= 5:
+                matched_text = f"overlap: {', '.join(overlap_strong_list)} (strong: {len(overlap_strong)}, total: {len(overlap)})"
+            else:
+                matched_text = f"overlap: {', '.join(overlap_strong_list[:5])}, ... (strong: {len(overlap_strong)}, total: {len(overlap)})"
+        else:
+            if len(overlap_list) <= 5:
+                matched_text = f"overlap: {', '.join(overlap_list)}"
+            else:
+                matched_text = f"overlap: {', '.join(overlap_list[:5])}, ... ({len(overlap_list)} tokens)"
+        
+        # Create error key from function/file info
+        file_path = chunk.get('file_path', 'unknown')
+        function_name = chunk.get('function_name', 'unknown')
+        error_key = f"Token overlap: {function_name} in {file_path}"
+        
+        # Avoid duplicate error keys
+        if error_key in seen_error_keys:
+            continue
+        
+        seen_error_keys.add(error_key)
+        seen_chunk_ids.add(chunk_id)
+        
+        results.append({
+            'error_key': error_key,
+            'chunks': [chunk],
+            'match_type': 'token_overlap',
+            'score': base_score,
+            'matched_text': matched_text,
+            'overlap_strong_count': len(overlap_strong),
+            'overlap_strong_tokens': list(overlap_strong_list[:5])  # Store sample for logging
+        })
+    
+    return results
 
 
 def normalize_error_message(message: str) -> str:
@@ -241,7 +440,8 @@ def _extract_search_phrases(error_message: str) -> List[str]:
 def search_chunk_index(
     error_message: str, 
     index_data: Dict[str, Any],
-    route_filter: Optional[str] = None
+    allowed_routes: Optional[Union[str, Set[str], List[str]]] = None,
+    enable_route_filter: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Search chunk-based index for error message.
@@ -258,7 +458,10 @@ def search_chunk_index(
     Args:
         error_message: Error message to search for
         index_data: Full index JSON structure with 'chunks' and 'error_index'
-        route_filter: Optional route to filter by ("kareela" | "gymea")
+        allowed_routes: Optional route(s) to filter by. Can be:
+            - None: no filtering
+            - str: single route (backward compatibility, converted to set)
+            - Set[str] or List[str]: multiple allowed routes (e.g., {"kareela", "unknown"})
     
     Returns:
         List of grouped results, each with error_key and chunks
@@ -278,16 +481,35 @@ def search_chunk_index(
     error_index = index_data.get('error_index', {})
     chunks_dict = {chunk['chunk_id']: chunk for chunk in index_data.get('chunks', [])}
     
-    # Apply route filter if provided
-    if route_filter:
+    # Normalize allowed_routes to a set (support backward compatibility with string)
+    allowed_routes_set = None
+    if allowed_routes:
+        if isinstance(allowed_routes, str):
+            allowed_routes_set = {allowed_routes}
+        elif isinstance(allowed_routes, (set, list)):
+            allowed_routes_set = set(allowed_routes)
+        else:
+            logger.warning(f"Invalid allowed_routes type: {type(allowed_routes)}, ignoring filter")
+    
+    # Apply route filter if provided AND filtering is enabled
+    if enable_route_filter and allowed_routes_set:
         original_count = len(chunks_dict)
         chunks_dict = {
             cid: chunk for cid, chunk in chunks_dict.items()
-            if chunk.get('route') == route_filter
+            if chunk.get('route') in allowed_routes_set
         }
-        logger.debug(
-            f"Route filter applied: {route_filter}, "
+        routes_list = sorted(list(allowed_routes_set))
+        logger.info(
+            f"Route filter applied: routes={routes_list}, "
             f"{len(chunks_dict)}/{original_count} chunks remain"
+        )
+    elif not enable_route_filter and allowed_routes_set:
+        # Filtering disabled but allowed_routes was provided (from candidates or default)
+        # Log once that filtering is disabled
+        routes_list = sorted(list(allowed_routes_set))
+        logger.debug(
+            f"Route filtering disabled: would have filtered routes={routes_list} (not applied) - "
+            f"searching all {len(chunks_dict)} chunks"
         )
     
     results = []
@@ -310,7 +532,7 @@ def search_chunk_index(
                             'error_key': error_key,
                             'chunks': [chunk],
                             'match_type': 'exact',
-                            'score': 1.0,
+                            'score': 1.0 * 4.0,  # Boost exact matches
                             'matched_text': matched_text
                         })
     
@@ -344,7 +566,7 @@ def search_chunk_index(
                             'error_key': original_msg,
                             'chunks': chunks,
                             'match_type': 'partial',
-                            'score': phrase_score,
+                            'score': phrase_score * 4.0,  # Boost partial matches
                             'matched_text': original_msg
                         })
     
@@ -412,7 +634,7 @@ def search_chunk_index(
                     'error_key': error_key,
                     'chunks': [chunk],
                     'match_type': 'code_search',
-                    'score': 0.6,  # Lower score for code matches
+                    'score': 0.6 * 1.5,  # Boost code matches
                     'matched_text': matched_text
                 })
     
@@ -423,23 +645,74 @@ def search_chunk_index(
         -x['score']  # then by score descending
     ))
     
-    # Limit total results to top 50 to avoid overwhelming the UI
-    # User can refine search if needed
-    return results[:50]
+    # Strategy 4: Token overlap search (for strong tokens and when results are sparse)
+    # Run if results are small OR if the query is a single token (likely a strong_token candidate)
+    should_run_token_overlap = (
+        len(results) < 5 or
+        len(search_phrases[0].split()) == 1  # Single token query
+    )
+    
+    if should_run_token_overlap:
+        # Extract strong tokens from query for gating
+        candidate_strong_tokens = _extract_strong_tokens(normalized_query)
+        
+        token_overlap_results = _token_overlap_search(
+            normalized_query,
+            chunks_dict,
+            seen_chunk_ids,
+            seen_error_keys,
+            candidate_strong_tokens=candidate_strong_tokens
+        )
+        results.extend(token_overlap_results)
+    
+    # Re-sort results after adding token_overlap
+    results.sort(key=lambda x: (
+        x['match_type'] != 'exact',  # exact first
+        x['match_type'] == 'code_search',  # code_search last
+        x['match_type'] == 'token_overlap',  # token_overlap after code_search
+        -x['score']  # then by score descending
+    ))
+    
+    # Apply limits: cap token_overlap results to 10 unless no exact/partial results
+    exact_partial_count = sum(1 for r in results if r.get('match_type') in ('exact', 'partial'))
+    token_overlap_results = [r for r in results if r.get('match_type') == 'token_overlap']
+    other_results = [r for r in results if r.get('match_type') != 'token_overlap']
+    
+    MAX_GROUPED_RESULTS = 25
+    MAX_TOKEN_OVERLAP_RESULTS = 10
+    if exact_partial_count == 0:
+        # If no exact/partial, allow more token_overlap
+        limited_token_overlap = token_overlap_results[:MAX_GROUPED_RESULTS]
+    else:
+        # Otherwise cap token_overlap to 10
+        limited_token_overlap = token_overlap_results[:MAX_TOKEN_OVERLAP_RESULTS]
+    
+    # Recombine and limit total
+    final_results = other_results + limited_token_overlap
+    final_results.sort(key=lambda x: (
+        x.get('match_type') != 'exact',
+        x.get('match_type') == 'code_search',
+        x.get('match_type') == 'token_overlap',
+        -x.get('score', 0)
+    ))
+    
+    return final_results[:MAX_GROUPED_RESULTS]
 
 
 def search_chunk_index_multi(
     query_candidates: List[Dict[str, Any]],
     index_data: Dict[str, Any],
-    route_filter: Optional[str] = None
+    allowed_routes: Optional[Union[str, Set[str], List[str]]] = None,
+    enable_route_filter: bool = False
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Search using multiple query candidates and merge results.
     
     Args:
-        query_candidates: List of candidate dicts with 'name', 'text', 'weight', 'route_filter'
+        query_candidates: List of candidate dicts with 'name', 'text', 'weight', 'allowed_routes'
         index_data: Full index JSON structure
-        route_filter: Optional default route filter (can be overridden per candidate)
+        allowed_routes: Optional default allowed routes (can be overridden per candidate).
+            Can be str, Set[str], or List[str] for backward compatibility.
     
     Returns:
         Tuple of (merged_results, debug_info)
@@ -455,12 +728,17 @@ def search_chunk_index_multi(
     
     logger.info(f"Multi-candidate search: {len(query_candidates)} candidates")
     
+    # Log route filtering status once
+    if not enable_route_filter:
+        logger.debug("Route filtering disabled: searching all chunks (candidate-level allowed_routes ignored)")
+    
     # Search each candidate
     for i, candidate in enumerate(query_candidates):
         candidate_name = candidate.get('name', f'candidate_{i}')
         candidate_text = candidate.get('text', '')
         candidate_weight = candidate.get('weight', 1.0)
-        candidate_route_filter = candidate.get('route_filter') or route_filter
+        # Support both 'route_filter' (old) and 'allowed_routes' (new) for backward compatibility
+        candidate_allowed_routes = candidate.get('allowed_routes') or candidate.get('route_filter') or allowed_routes
         
         if not candidate_text:
             continue
@@ -469,27 +747,53 @@ def search_chunk_index_multi(
         
         try:
             # Search with this candidate
-            results = search_chunk_index(candidate_text, index_data, route_filter=candidate_route_filter)
+            results = search_chunk_index(
+                candidate_text, 
+                index_data, 
+                allowed_routes=candidate_allowed_routes,
+                enable_route_filter=enable_route_filter
+            )
             
-            # Count match types
-            match_counts = {'exact': 0, 'partial': 0, 'code_search': 0}
-            for r in results:
-                match_type = r.get('match_type', 'partial')
-                match_counts[match_type] = match_counts.get(match_type, 0) + 1
+            # Compute match_counts from results (always compute safely)
+            match_counts = {'exact': 0, 'partial': 0, 'code_search': 0, 'token_overlap': 0}
+            if results:
+                for r in results:
+                    match_type = r.get('match_type', 'partial')
+                    if match_type in match_counts:
+                        match_counts[match_type] += 1
             
+            # Normalize allowed_routes for logging
+            routes_str = None
+            if candidate_allowed_routes:
+                if isinstance(candidate_allowed_routes, str):
+                    routes_str = [candidate_allowed_routes]
+                elif isinstance(candidate_allowed_routes, (set, list)):
+                    routes_str = sorted(list(set(candidate_allowed_routes)))
+            
+            # Package candidate stat (safe - match_counts always defined)
             candidate_stat = {
                 'name': candidate_name,
                 'text': candidate_text,
                 'weight': candidate_weight,
-                'route_filter': candidate_route_filter,
-                'total_results': len(results),
-                'match_counts': match_counts
+                'allowed_routes': routes_str,
+                'total_results': len(results) if results else 0,
+                'match_counts': match_counts.copy()  # Copy to avoid mutation
             }
             candidate_stats.append(candidate_stat)
             
+            # Extract and log strong tokens for this candidate
+            candidate_strong_tokens = _extract_strong_tokens(candidate_text)
+            strong_tokens_display = sorted(list(candidate_strong_tokens))[:12]
+            strong_tokens_str = ', '.join(strong_tokens_display)
+            if len(candidate_strong_tokens) > 12:
+                strong_tokens_str += f' ... ({len(candidate_strong_tokens)} total)'
+            
+            # Log candidate (safe - match_counts always defined)
             logger.debug(
-                f"Candidate '{candidate_name}': {len(results)} results "
-                f"(exact:{match_counts['exact']}/partial:{match_counts['partial']}/code:{match_counts['code_search']})"
+                f"Candidate '{candidate_name}'(\"{candidate_text[:60]}...\"): {len(results) if results else 0} results "
+                f"(exact:{match_counts['exact']}/partial:{match_counts['partial']}/"
+                f"code:{match_counts['code_search']}/token_overlap:{match_counts['token_overlap']}) "
+                f"strong_tokens=[{strong_tokens_str}]"
             )
             
             # Merge results into merged_hits
@@ -526,20 +830,26 @@ def search_chunk_index_multi(
                     merged_hits[key]['scores'].append(weighted_score)
                     merged_hits[key]['candidates_hit'].append(candidate_name)
                     
-                    # Update match_type to best (exact > partial > code_search)
+                    # Update match_type to best (exact > partial > code_search > token_overlap)
                     current_type = merged_hits[key]['match_type']
-                    type_priority = {'exact': 3, 'partial': 2, 'code_search': 1}
+                    type_priority = {'exact': 4, 'partial': 3, 'code_search': 2, 'token_overlap': 1}
                     if type_priority.get(match_type, 0) > type_priority.get(current_type, 0):
                         merged_hits[key]['match_type'] = match_type
                         merged_hits[key]['matched_text'] = matched_text
         
         except Exception as e:
-            logger.warning(f"Error searching candidate '{candidate_name}': {e}", exc_info=True)
+            logger.error(f"Error searching candidate '{candidate_name}': {e}", exc_info=True)
+            # On error, still create stat entry but mark as error
+            # This ensures we don't lose track of which candidates failed
             candidate_stats.append({
                 'name': candidate_name,
                 'text': candidate_text,
+                'weight': candidate_weight,
+                'total_results': 0,
+                'match_counts': {'exact': 0, 'partial': 0, 'code_search': 0, 'token_overlap': 0},
                 'error': str(e)
             })
+            continue  # Skip to next candidate
     
     # Calculate aggregate scores with multi-candidate bonus
     for key, hit in merged_hits.items():
@@ -568,14 +878,39 @@ def search_chunk_index_multi(
                 'matched_text': hit['matched_text']
             }
         
-        grouped_results[error_key]['chunks'].append(hit['chunk'])
+        # Limit chunks per group
+        MAX_CHUNKS_PER_GROUP = 3
+        if len(grouped_results[error_key]['chunks']) < MAX_CHUNKS_PER_GROUP:
+            grouped_results[error_key]['chunks'].append(hit['chunk'])
     
     # Convert to list and sort by aggregate score (descending)
     merged_results = list(grouped_results.values())
     merged_results.sort(key=lambda x: -x['score'])
     
-    # Limit to top 50
-    merged_results = merged_results[:50]
+    # Apply limits: cap token_overlap results to 10 unless no exact/partial results
+    exact_partial_count = sum(1 for r in merged_results if r.get('match_type') in ('exact', 'partial'))
+    token_overlap_results = [r for r in merged_results if r.get('match_type') == 'token_overlap']
+    other_results = [r for r in merged_results if r.get('match_type') != 'token_overlap']
+    
+    MAX_GROUPED_RESULTS = 25
+    MAX_TOKEN_OVERLAP_RESULTS = 10
+    if exact_partial_count == 0:
+        # If no exact/partial, allow more token_overlap
+        limited_token_overlap = token_overlap_results[:MAX_GROUPED_RESULTS]
+    else:
+        # Otherwise cap token_overlap to 10
+        limited_token_overlap = token_overlap_results[:MAX_TOKEN_OVERLAP_RESULTS]
+    
+    # Recombine and limit total
+    final_results = other_results + limited_token_overlap
+    final_results.sort(key=lambda x: (
+        x.get('match_type') != 'exact',
+        x.get('match_type') == 'code_search',
+        x.get('match_type') == 'token_overlap',
+        -x.get('score', 0)
+    ))
+    
+    merged_results = final_results[:MAX_GROUPED_RESULTS]
     
     # Build debug info
     debug_info = {
@@ -598,22 +933,35 @@ def search_chunk_index_multi(
         top_hit = {
             'error_key': error_key,
             'score': result['score'],
-            'match_type': result['match_type']
+            'match_type': result.get('match_type', 'partial'),
+            'matched_text': result.get('matched_text', '')[:200]  # Truncate
         }
         
         if hit_info:
             top_hit['candidate_count'] = len(hit_info['candidates_hit'])
             top_hit['candidates_hit'] = hit_info['candidates_hit']
+            top_hit['aggregate_score'] = hit_info.get('aggregate_score', 0.0)
+        
+        # Add strong token info for token_overlap matches
+        if top_hit['match_type'] == 'token_overlap':
+            overlap_strong_count = result.get('overlap_strong_count', 0)
+            overlap_strong_tokens = result.get('overlap_strong_tokens', [])
+            top_hit['overlap_strong_count'] = overlap_strong_count
+            top_hit['overlap_strong_tokens'] = overlap_strong_tokens[:5]  # Sample of 5
         
         debug_info['top_hits'].append(top_hit)
     
-    # Route-filter fallback: if route_filter was applied and we got no results, try without filter
+    # Route-filter fallback: if allowed_routes was applied and we got no results, try without filter
+    # Only if filtering is enabled
     fallback_triggered = False
-    if route_filter and len(merged_results) == 0:
-        logger.info(f"No results with route_filter={route_filter}, trying global search (fallback)")
+    if enable_route_filter and allowed_routes and len(merged_results) == 0:
+        routes_display = allowed_routes
+        if isinstance(allowed_routes, (set, list)):
+            routes_display = sorted(list(set(allowed_routes)))
+        logger.info(f"No results with allowed_routes={routes_display}, trying global search (fallback)")
         fallback_triggered = True
         
-        # Retry with route_filter=None for all candidates
+        # Retry with allowed_routes=None for all candidates
         for i, candidate in enumerate(query_candidates):
             candidate_name = candidate.get('name', f'candidate_{i}')
             candidate_text = candidate.get('text', '')
@@ -623,7 +971,12 @@ def search_chunk_index_multi(
                 continue
             
             try:
-                results = search_chunk_index(candidate_text, index_data, route_filter=None)
+                results = search_chunk_index(
+                    candidate_text, 
+                    index_data, 
+                    allowed_routes=None,
+                    enable_route_filter=enable_route_filter
+                )
                 
                 # Merge into existing merged_hits
                 for result in results:
@@ -684,11 +1037,15 @@ def search_chunk_index_multi(
                     'score': hit['aggregate_score'],
                     'matched_text': hit['matched_text']
                 }
-            grouped_results[error_key]['chunks'].append(hit['chunk'])
+            # Limit chunks per group
+            MAX_CHUNKS_PER_GROUP = 3
+            if len(grouped_results[error_key]['chunks']) < MAX_CHUNKS_PER_GROUP:
+                grouped_results[error_key]['chunks'].append(hit['chunk'])
         
         merged_results = list(grouped_results.values())
         merged_results.sort(key=lambda x: -x['score'])
-        merged_results = merged_results[:50]
+        MAX_GROUPED_RESULTS = 25
+        merged_results = merged_results[:MAX_GROUPED_RESULTS]
         
         logger.info(f"Fallback search complete: {len(merged_hits)} unique hits, {len(merged_results)} grouped results")
     

@@ -271,16 +271,30 @@ export async function downloadVersion(
 
 export async function searchIndex(
   machineId: string,
-  queryText: string
+  queryText: string,
+  debug: boolean = false
 ): Promise<{
   machine_id: string;
   query: string;
+  parsed?: {
+    route: string;
+    confidence: number;
+    query_text: string;
+    payload?: string;
+    component?: string;
+    severity?: string;
+    tag?: string;
+  };
   results: SearchResult[];
   total_matches: number;
+  debug?: any;
 }> {
   const formData = new FormData();
   formData.append('machine_id', machineId);
   formData.append('query_text', queryText);
+  if (debug) {
+    formData.append('debug', 'true');
+  }
   
   const headers = await getHeaders();
   delete headers['Content-Type'];
@@ -345,6 +359,56 @@ export async function getMachineErrorKeys(machineId: string): Promise<{
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }));
     throw new Error(error.detail || `Failed to get error keys: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
+export interface AiSummary {
+  what_it_means: string;
+  most_likely_cause: string;
+  what_to_check: string[];
+  where_in_code: Array<{
+    file_path: string;
+    lines: string | null;
+    symbol: string;
+    why: string;
+  }>;
+  confidence: {
+    level: 'high' | 'medium' | 'low';
+    why: string;
+  };
+}
+
+export async function generateAiSummary(
+  payload: any,
+  debug: boolean = false
+): Promise<{
+  ok: boolean;
+  summary: AiSummary;
+  meta: {
+    model: string;
+    elapsed_ms: number;
+    tokens: number | null;
+  };
+}> {
+  const headers = await getHeaders();
+  headers['Content-Type'] = 'application/json';
+  
+  const url = new URL(`${API_BASE_URL}/api/error-debug/ai-summary`);
+  if (debug) {
+    url.searchParams.append('debug', 'true');
+  }
+  
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+  });
+  
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(error.detail || `Failed to generate AI summary: ${response.statusText}`);
   }
   
   return response.json();
