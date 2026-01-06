@@ -24,7 +24,9 @@ from backend.models.error_debug_models import Machine, MachineIndexVersion
 from backend.utils.auth import require_role, DevUser
 from backend.utils.db import get_db
 from backend.utils.index_storage import save_index_file, load_index_file, delete_index_file
-from backend.utils.index_search import search_chunk_index
+from backend.utils.index_search import search_chunk_index, search_chunk_index_multi
+from backend.utils.log_parser import parse_log_line
+from backend.utils.query_candidates import build_query_candidates
 
 router = APIRouter(prefix="/api/error-debug", tags=["error-debug"])
 
@@ -633,12 +635,17 @@ async def delete_version(
 async def search_index(
     machine_id: str = Form(...),
     query_text: str = Form(...),
+    debug: bool = Form(False),
     db: Session = Depends(get_db),
     user: DevUser = Depends(require_role)
 ):
-    """Search active index for error message."""
+    """Search active index for error message using multi-candidate search."""
     start_time = time.time()
-    logger.info(f"Search request: machine_id={machine_id}, query='{query_text[:50]}...', user={user.email}")
+    logger.info(
+        f"Search request: machine_id={machine_id}, "
+        f"query='{query_text[:50]}{'...' if len(query_text) > 50 else ''}', "
+        f"debug={debug}, user={user.email}"
+    )
     
     try:
         machine_uuid = uuid.UUID(machine_id)
@@ -675,10 +682,91 @@ async def search_index(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to load index: {e}")
     
-    # Search
-    from backend.utils.index_search import normalize_error_message
-    normalized_query = normalize_error_message(query_text)
-    results = search_chunk_index(query_text, index_data)
+    # Parse log line to get route and normalized query
+    parsed = parse_log_line(query_text)
+    route = parsed['route']
+    confidence = parsed['confidence']
+    normalized_query = parsed['query_text']
+    
+    logger.info(
+        f"Log parsed: route={route}, confidence={confidence:.2f}, "
+        f"query_text='{normalized_query[:60]}{'...' if len(normalized_query) > 60 else ''}'"
+    )
+    
+    # Apply route filter if confidence is high enough
+    route_filter = None
+    if route in ('kareela', 'gymea') and confidence >= 0.8:
+        route_filter = route
+        logger.info(f"Route filter will be applied: {route_filter}")
+    else:
+        logger.info(f"No route filter (route={route}, confidence={confidence:.2f})")
+    
+    # Generate query candidates
+    try:
+        candidates = build_query_candidates(parsed, query_text)
+        logger.info(f"Generated {len(candidates)} query candidates")
+        
+        if debug:
+            logger.debug("Query candidates:")
+            for i, cand in enumerate(candidates, 1):
+                logger.debug(
+                    f"  {i}. {cand['name']}: '{cand['text'][:60]}{'...' if len(cand['text']) > 60 else ''}' "
+                    f"(weight={cand['weight']:.1f}, route_filter={cand.get('route_filter')})"
+                )
+    except Exception as e:
+        logger.warning(f"Error generating query candidates, falling back to single query: {e}", exc_info=True)
+        candidates = None
+    
+    # Use multi-candidate search if candidates were generated, otherwise fallback to single query
+    debug_info = None
+    if candidates and len(candidates) > 0:
+        try:
+            # Use route_filter from parsed (can be overridden per candidate)
+            results, debug_info = search_chunk_index_multi(candidates, index_data, route_filter=route_filter)
+            
+            # Log candidate stats
+            logger.info("Candidate search stats:")
+            for stat in debug_info.get('candidates', []):
+                if 'error' in stat:
+                    logger.warning(f"  {stat['name']}: ERROR - {stat['error']}")
+                else:
+                    logger.info(
+                        f"  {stat['name']}: {stat['total_results']} results "
+                        f"(exact:{stat['match_counts'].get('exact', 0)}/"
+                        f"partial:{stat['match_counts'].get('partial', 0)}/"
+                        f"code:{stat['match_counts'].get('code_search', 0)})"
+                    )
+            
+            # Log merge summary
+            logger.info(
+                f"Merge summary: {debug_info['total_unique_hits']} unique hits, "
+                f"{debug_info['total_grouped_results']} grouped results"
+            )
+            
+            if debug_info.get('route_filter_fallback_triggered'):
+                logger.info("Route filter fallback was triggered (searched globally after route-filtered search returned no results)")
+            
+            # Log top hits
+            top_hits = debug_info.get('top_hits', [])[:5]
+            if top_hits:
+                logger.info("Top 5 hits:")
+                for i, hit in enumerate(top_hits, 1):
+                    logger.info(
+                        f"  {i}. error_key='{hit['error_key'][:50]}{'...' if len(hit['error_key']) > 50 else ''}' "
+                        f"score={hit['score']:.3f}, candidates={hit['candidate_count']}, "
+                        f"match_type={hit['match_type']}"
+                    )
+                    if debug:
+                        logger.debug(f"      candidates_hit: {hit['candidates_hit']}")
+        
+        except Exception as e:
+            logger.error(f"Error in multi-candidate search, falling back to single query: {e}", exc_info=True)
+            # Fallback to single query
+            results = search_chunk_index(normalized_query, index_data, route_filter=route_filter)
+    else:
+        # Fallback to single query search
+        logger.info("Using single-query search (no candidates or candidate generation failed)")
+        results = search_chunk_index(normalized_query, index_data, route_filter=route_filter)
     
     elapsed_ms = int((time.time() - start_time) * 1000)
     match_types = {'exact': 0, 'partial': 0, 'code_search': 0}
@@ -689,19 +777,30 @@ async def search_index(
         match_types[match_type] += 1
     
     logger.info(
-        f"Search result: machine_id={machine_id}, "
-        f"normalized_query='{normalized_query[:50]}...', "
+        f"Search complete: machine_id={machine_id}, "
         f"match_type=exact:{match_types.get('exact', 0)}/partial:{match_types.get('partial', 0)}/code_search:{match_types.get('code_search', 0)}, "
         f"total_results={len(results)}, "
-        f"elapsed_ms={elapsed_ms}"
+        f"elapsed_ms={elapsed_ms}ms"
     )
     
-    return {
+    # Build response
+    response = {
         "machine_id": machine_id,
         "query": query_text,
+        "parsed": {
+            "route": route,
+            "confidence": confidence,
+            "query_text": normalized_query,
+        },
         "results": results,
         "total_matches": len(results)
     }
+    
+    # Add debug info only if requested
+    if debug and debug_info:
+        response["debug"] = debug_info
+    
+    return response
 
 
 # Email Script Route

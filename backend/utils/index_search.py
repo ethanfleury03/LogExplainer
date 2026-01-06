@@ -5,7 +5,10 @@ Searches pre-indexed codebase chunks for error messages.
 """
 
 import re
-from typing import List, Dict, Any
+import logging
+from typing import List, Dict, Any, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_error_message(message: str) -> str:
@@ -235,7 +238,11 @@ def _extract_search_phrases(error_message: str) -> List[str]:
     return unique_phrases if unique_phrases else [normalized] if normalized else []
 
 
-def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def search_chunk_index(
+    error_message: str, 
+    index_data: Dict[str, Any],
+    route_filter: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """
     Search chunk-based index for error message.
     
@@ -251,6 +258,7 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
     Args:
         error_message: Error message to search for
         index_data: Full index JSON structure with 'chunks' and 'error_index'
+        route_filter: Optional route to filter by ("kareela" | "gymea")
     
     Returns:
         List of grouped results, each with error_key and chunks
@@ -269,6 +277,18 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
     
     error_index = index_data.get('error_index', {})
     chunks_dict = {chunk['chunk_id']: chunk for chunk in index_data.get('chunks', [])}
+    
+    # Apply route filter if provided
+    if route_filter:
+        original_count = len(chunks_dict)
+        chunks_dict = {
+            cid: chunk for cid, chunk in chunks_dict.items()
+            if chunk.get('route') == route_filter
+        }
+        logger.debug(
+            f"Route filter applied: {route_filter}, "
+            f"{len(chunks_dict)}/{original_count} chunks remain"
+        )
     
     results = []
     seen_error_keys = set()
@@ -406,4 +426,278 @@ def search_chunk_index(error_message: str, index_data: Dict[str, Any]) -> List[D
     # Limit total results to top 50 to avoid overwhelming the UI
     # User can refine search if needed
     return results[:50]
+
+
+def search_chunk_index_multi(
+    query_candidates: List[Dict[str, Any]],
+    index_data: Dict[str, Any],
+    route_filter: Optional[str] = None
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Search using multiple query candidates and merge results.
+    
+    Args:
+        query_candidates: List of candidate dicts with 'name', 'text', 'weight', 'route_filter'
+        index_data: Full index JSON structure
+        route_filter: Optional default route filter (can be overridden per candidate)
+    
+    Returns:
+        Tuple of (merged_results, debug_info)
+        - merged_results: List of grouped results (same format as search_chunk_index)
+        - debug_info: Dict with candidate stats and merge summary
+    """
+    if not query_candidates or not index_data:
+        return ([], {})
+    
+    # Track results by (error_key, chunk_id) pair
+    merged_hits = {}  # (error_key, chunk_id) -> {result dict, scores, candidates}
+    candidate_stats = []
+    
+    logger.info(f"Multi-candidate search: {len(query_candidates)} candidates")
+    
+    # Search each candidate
+    for i, candidate in enumerate(query_candidates):
+        candidate_name = candidate.get('name', f'candidate_{i}')
+        candidate_text = candidate.get('text', '')
+        candidate_weight = candidate.get('weight', 1.0)
+        candidate_route_filter = candidate.get('route_filter') or route_filter
+        
+        if not candidate_text:
+            continue
+        
+        logger.debug(f"Searching candidate {i+1}/{len(query_candidates)}: {candidate_name} = '{candidate_text[:60]}...'")
+        
+        try:
+            # Search with this candidate
+            results = search_chunk_index(candidate_text, index_data, route_filter=candidate_route_filter)
+            
+            # Count match types
+            match_counts = {'exact': 0, 'partial': 0, 'code_search': 0}
+            for r in results:
+                match_type = r.get('match_type', 'partial')
+                match_counts[match_type] = match_counts.get(match_type, 0) + 1
+            
+            candidate_stat = {
+                'name': candidate_name,
+                'text': candidate_text,
+                'weight': candidate_weight,
+                'route_filter': candidate_route_filter,
+                'total_results': len(results),
+                'match_counts': match_counts
+            }
+            candidate_stats.append(candidate_stat)
+            
+            logger.debug(
+                f"Candidate '{candidate_name}': {len(results)} results "
+                f"(exact:{match_counts['exact']}/partial:{match_counts['partial']}/code:{match_counts['code_search']})"
+            )
+            
+            # Merge results into merged_hits
+            for result in results:
+                error_key = result.get('error_key', 'unknown')
+                chunks = result.get('chunks', [])
+                match_type = result.get('match_type', 'partial')
+                base_score = result.get('score', 0.0)
+                matched_text = result.get('matched_text', '')
+                
+                # Weighted score for this candidate
+                weighted_score = base_score * candidate_weight
+                
+                for chunk in chunks:
+                    chunk_id = chunk.get('chunk_id', '')
+                    if not chunk_id:
+                        continue
+                    
+                    key = (error_key, chunk_id)
+                    
+                    if key not in merged_hits:
+                        # First time seeing this hit
+                        merged_hits[key] = {
+                            'error_key': error_key,
+                            'chunk': chunk,
+                            'match_type': match_type,  # Use best match_type (exact > partial > code_search)
+                            'matched_text': matched_text,
+                            'scores': [],
+                            'candidates_hit': [],
+                            'aggregate_score': 0.0
+                        }
+                    
+                    # Add to this hit's scores and candidates
+                    merged_hits[key]['scores'].append(weighted_score)
+                    merged_hits[key]['candidates_hit'].append(candidate_name)
+                    
+                    # Update match_type to best (exact > partial > code_search)
+                    current_type = merged_hits[key]['match_type']
+                    type_priority = {'exact': 3, 'partial': 2, 'code_search': 1}
+                    if type_priority.get(match_type, 0) > type_priority.get(current_type, 0):
+                        merged_hits[key]['match_type'] = match_type
+                        merged_hits[key]['matched_text'] = matched_text
+        
+        except Exception as e:
+            logger.warning(f"Error searching candidate '{candidate_name}': {e}", exc_info=True)
+            candidate_stats.append({
+                'name': candidate_name,
+                'text': candidate_text,
+                'error': str(e)
+            })
+    
+    # Calculate aggregate scores with multi-candidate bonus
+    for key, hit in merged_hits.items():
+        scores = hit['scores']
+        candidate_count = len(hit['candidates_hit'])
+        
+        # Base score: sum of weighted scores
+        base_agg_score = sum(scores)
+        
+        # Multi-candidate bonus: +0.1 per additional candidate (max +0.3)
+        bonus = min(0.3, (candidate_count - 1) * 0.1)
+        
+        hit['aggregate_score'] = base_agg_score + bonus
+    
+    # Convert merged_hits to grouped results format
+    # Group by error_key (since that's how the API expects results)
+    grouped_results = {}  # error_key -> list of chunks with scores
+    
+    for (error_key, chunk_id), hit in merged_hits.items():
+        if error_key not in grouped_results:
+            grouped_results[error_key] = {
+                'error_key': error_key,
+                'chunks': [],
+                'match_type': hit['match_type'],
+                'score': hit['aggregate_score'],
+                'matched_text': hit['matched_text']
+            }
+        
+        grouped_results[error_key]['chunks'].append(hit['chunk'])
+    
+    # Convert to list and sort by aggregate score (descending)
+    merged_results = list(grouped_results.values())
+    merged_results.sort(key=lambda x: -x['score'])
+    
+    # Limit to top 50
+    merged_results = merged_results[:50]
+    
+    # Build debug info
+    debug_info = {
+        'candidates': candidate_stats,
+        'total_unique_hits': len(merged_hits),
+        'total_grouped_results': len(merged_results),
+        'top_hits': []
+    }
+    
+    # Add top hits with candidate info from merged_hits
+    for result in merged_results[:5]:
+        error_key = result['error_key']
+        # Find matching hit to get candidate info
+        hit_info = None
+        for (ek, cid), hit in merged_hits.items():
+            if ek == error_key:
+                hit_info = hit
+                break
+        
+        top_hit = {
+            'error_key': error_key,
+            'score': result['score'],
+            'match_type': result['match_type']
+        }
+        
+        if hit_info:
+            top_hit['candidate_count'] = len(hit_info['candidates_hit'])
+            top_hit['candidates_hit'] = hit_info['candidates_hit']
+        
+        debug_info['top_hits'].append(top_hit)
+    
+    # Route-filter fallback: if route_filter was applied and we got no results, try without filter
+    fallback_triggered = False
+    if route_filter and len(merged_results) == 0:
+        logger.info(f"No results with route_filter={route_filter}, trying global search (fallback)")
+        fallback_triggered = True
+        
+        # Retry with route_filter=None for all candidates
+        for i, candidate in enumerate(query_candidates):
+            candidate_name = candidate.get('name', f'candidate_{i}')
+            candidate_text = candidate.get('text', '')
+            candidate_weight = candidate.get('weight', 1.0)
+            
+            if not candidate_text:
+                continue
+            
+            try:
+                results = search_chunk_index(candidate_text, index_data, route_filter=None)
+                
+                # Merge into existing merged_hits
+                for result in results:
+                    error_key = result.get('error_key', 'unknown')
+                    chunks = result.get('chunks', [])
+                    match_type = result.get('match_type', 'partial')
+                    base_score = result.get('score', 0.0)
+                    matched_text = result.get('matched_text', '')
+                    
+                    weighted_score = base_score * candidate_weight
+                    
+                    for chunk in chunks:
+                        chunk_id = chunk.get('chunk_id', '')
+                        if not chunk_id:
+                            continue
+                        
+                        key = (error_key, chunk_id)
+                        
+                        if key not in merged_hits:
+                            merged_hits[key] = {
+                                'error_key': error_key,
+                                'chunk': chunk,
+                                'match_type': match_type,
+                                'matched_text': matched_text,
+                                'scores': [],
+                                'candidates_hit': [],
+                                'aggregate_score': 0.0
+                            }
+                        
+                        merged_hits[key]['scores'].append(weighted_score)
+                        merged_hits[key]['candidates_hit'].append(candidate_name)
+                        
+                        current_type = merged_hits[key]['match_type']
+                        type_priority = {'exact': 3, 'partial': 2, 'code_search': 1}
+                        if type_priority.get(match_type, 0) > type_priority.get(current_type, 0):
+                            merged_hits[key]['match_type'] = match_type
+                            merged_hits[key]['matched_text'] = matched_text
+            
+            except Exception as e:
+                logger.warning(f"Error in fallback search for candidate '{candidate_name}': {e}")
+        
+        # Recalculate aggregate scores after fallback
+        for key, hit in merged_hits.items():
+            scores = hit['scores']
+            candidate_count = len(hit['candidates_hit'])
+            base_agg_score = sum(scores)
+            bonus = min(0.3, (candidate_count - 1) * 0.1)
+            hit['aggregate_score'] = base_agg_score + bonus
+        
+        # Regroup results
+        grouped_results = {}
+        for (error_key, chunk_id), hit in merged_hits.items():
+            if error_key not in grouped_results:
+                grouped_results[error_key] = {
+                    'error_key': error_key,
+                    'chunks': [],
+                    'match_type': hit['match_type'],
+                    'score': hit['aggregate_score'],
+                    'matched_text': hit['matched_text']
+                }
+            grouped_results[error_key]['chunks'].append(hit['chunk'])
+        
+        merged_results = list(grouped_results.values())
+        merged_results.sort(key=lambda x: -x['score'])
+        merged_results = merged_results[:50]
+        
+        logger.info(f"Fallback search complete: {len(merged_hits)} unique hits, {len(merged_results)} grouped results")
+    
+    debug_info['route_filter_fallback_triggered'] = fallback_triggered
+    
+    logger.info(
+        f"Multi-candidate search complete: {len(merged_hits)} unique hits, "
+        f"{len(merged_results)} grouped results"
+    )
+    
+    return (merged_results, debug_info)
 

@@ -944,6 +944,41 @@ def build_custom_error_glossary(all_custom_exceptions, all_exception_usages):
     return glossary
 
 
+def _detect_chunk_route(file_path, func_name, class_name, code):
+    """
+    Detect route for a chunk based on file path and content heuristics.
+    
+    Returns: "kareela" | "gymea" | "unknown"
+    """
+    file_path_lower = file_path.lower() if file_path else ""
+    func_name_lower = func_name.lower() if func_name else ""
+    class_name_lower = class_name.lower() if class_name else ""
+    code_lower = code.lower() if code else ""
+    
+    # Path-based heuristics
+    if 'kareela' in file_path_lower and 'gymea' not in file_path_lower:
+        return 'kareela'
+    if 'gymea' in file_path_lower and 'kareela' not in file_path_lower:
+        return 'gymea'
+    
+    # Check function/class names
+    if 'kareela' in func_name_lower or 'kareela' in class_name_lower:
+        if 'gymea' not in func_name_lower and 'gymea' not in class_name_lower:
+            return 'kareela'
+    
+    if 'gymea' in func_name_lower or 'gymea' in class_name_lower:
+        if 'kareela' not in func_name_lower and 'kareela' not in class_name_lower:
+            return 'gymea'
+    
+    # Check code content for route identifiers
+    if 'kareela' in code_lower and 'gymea' not in code_lower:
+        return 'kareela'
+    if 'gymea' in code_lower and 'kareela' not in code_lower:
+        return 'gymea'
+    
+    return 'unknown'
+
+
 def extract_function_chunk(file_path, func_node, source_lines, class_name=None, boundary_map=None, source_text=None):
     """
     Extract function as chunk with full metadata including signature, decorators, and perfect boundaries.
@@ -1090,6 +1125,9 @@ def extract_function_chunk(file_path, func_node, source_lines, class_name=None, 
     
     signature_span = {'start': def_line, 'end': header_end_line}
     
+    # Detect route for this chunk
+    route = _detect_chunk_route(file_path, func_node.name, class_name, func_code)
+    
     # Build chunk with backward-compatible fields first
     chunk = {
         # Backward-compatible fields (must remain)
@@ -1117,6 +1155,9 @@ def extract_function_chunk(file_path, func_node, source_lines, class_name=None, 
         "decorator_span": decorator_span,
         "signature_span": signature_span,
         "extraction_warnings": extraction_warnings,
+        
+        # Route tagging for filtering
+        "route": route,
     }
     
     # Generate chunk ID using stable subset (backward compatible fields only)
