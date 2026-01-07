@@ -36,16 +36,18 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   }, []);
 
   // Check if we should show the sidebar (computed values)
-  // Show MachineSidebar on Error Debug (including settings) and Error Library pages (both use machine indexes)
+  // Show MachineSidebar on Error Debug (including settings), Call Trace, and Error Library pages (all use machine indexes)
   const isErrorDebugArea = mounted && pathname?.startsWith('/tech/error-debug') || false;
+  const isCallTraceArea = mounted && pathname?.startsWith('/tech/call-trace') || false;
   const isLibraryArea = mounted && pathname?.startsWith('/library') || false;
-  const shouldShow = (isErrorDebugArea || isLibraryArea) && user && hasRole(user, 'TECHNICIAN');
+  const shouldShow = (isErrorDebugArea || isCallTraceArea || isLibraryArea) && user && hasRole(user, 'TECHNICIAN');
 
-  // Extract machine ID from pathname if on error-debug (including settings) or library page
-  // Pattern: /tech/error-debug/[machineId]/... or /tech/error-debug/[machineId]/settings
+  // Extract machine ID from pathname if on error-debug (including settings), call-trace, or library page
+  // Pattern: /tech/error-debug/[machineId]/... or /tech/call-trace/[machineId] or /library/[machineId]
   const errorDebugMachineId = pathname?.match(/\/tech\/error-debug\/([^\/]+)/)?.[1] || null;
+  const callTraceMachineId = pathname?.match(/\/tech\/call-trace\/([^\/]+)/)?.[1] || null;
   const libraryMachineId = pathname?.match(/\/library\/([^\/]+)/)?.[1] || null;
-  const selectedMachineId = errorDebugMachineId || libraryMachineId;
+  const selectedMachineId = errorDebugMachineId || callTraceMachineId || libraryMachineId;
 
   // Debug logging for machine selection changes (dev only)
   useEffect(() => {
@@ -129,7 +131,7 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
   // Always render container when in Error Debug or Library area to maintain layout order
   // This prevents sidebars from flipping positions
   // Conditional return AFTER all hooks are called
-  if (!mounted || (!isErrorDebugArea && !isLibraryArea)) {
+  if (!mounted || (!isErrorDebugArea && !isCallTraceArea && !isLibraryArea)) {
     return <div className="w-0" />; // Invisible placeholder to maintain flex order
   }
 

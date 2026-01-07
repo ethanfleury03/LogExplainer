@@ -1424,3 +1424,95 @@ async def get_callgraph(
         "unresolved": unresolved
     }
 
+
+@router.get("/chunks")
+async def get_chunks_by_ids(
+    machine_id: str = Query(...),
+    chunk_ids: str = Query(..., description="Comma-separated list of chunk IDs"),
+    db: Session = Depends(get_db),
+    user: DevUser = Depends(require_role)
+):
+    """
+    Get full chunk details (including code) for specified chunk IDs.
+    
+    Query params:
+    - machine_id: Machine ID
+    - chunk_ids: Comma-separated list of chunk IDs
+    """
+    logger.info(
+        f"Get chunks request: machine_id={machine_id}, chunk_ids={chunk_ids[:100]}{'...' if len(chunk_ids) > 100 else ''}, user={user.email}"
+    )
+    
+    try:
+        machine_uuid = uuid.UUID(machine_id)
+    except ValueError:
+        logger.error(f"Invalid machine_id format: {machine_id}")
+        raise HTTPException(status_code=400, detail="Invalid machine_id format")
+    
+    machine = db.query(Machine).filter(Machine.id == machine_uuid).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    
+    if not machine.active_version_id:
+        raise HTTPException(status_code=400, detail="No active index for this machine")
+    
+    # Get active version
+    version = db.query(MachineIndexVersion).filter(
+        MachineIndexVersion.id == machine.active_version_id
+    ).first()
+    
+    if not version:
+        raise HTTPException(status_code=404, detail="Active version not found")
+    
+    # Parse chunk IDs
+    requested_ids = [cid.strip() for cid in chunk_ids.split(',') if cid.strip()]
+    if not requested_ids:
+        raise HTTPException(status_code=400, detail="No chunk IDs provided")
+    
+    if len(requested_ids) > 100:
+        raise HTTPException(status_code=400, detail="Too many chunk IDs (max 100)")
+    
+    # Try cache first
+    index_data = _get_cached_index(str(machine.id), str(version.id))
+    
+    if not index_data:
+        # Load from storage
+        try:
+            index_bytes = load_index_file(version.gcs_bucket, version.gcs_object)
+            index_data = json.loads(index_bytes.decode('utf-8'))
+            _set_cached_index(str(machine.id), str(version.id), index_data)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Index file not found in storage")
+        except Exception as e:
+            logger.error(f"Failed to load index: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to load index: {e}")
+    
+    # Build chunk lookup map
+    chunks_by_id = {}
+    for chunk in index_data.get('chunks', []):
+        cid = chunk.get('chunk_id')
+        if cid:
+            chunks_by_id[cid] = chunk
+    
+    # Find requested chunks
+    found_chunks = []
+    missing_ids = []
+    
+    for chunk_id in requested_ids:
+        if chunk_id in chunks_by_id:
+            found_chunks.append(chunks_by_id[chunk_id])
+        else:
+            missing_ids.append(chunk_id)
+    
+    logger.info(
+        f"Get chunks: requested={len(requested_ids)}, found={len(found_chunks)}, missing={len(missing_ids)}"
+    )
+    
+    return {
+        "machine_id": machine_id,
+        "requested_count": len(requested_ids),
+        "found_count": len(found_chunks),
+        "chunks": found_chunks,
+        "missing_ids": missing_ids
+    }
+

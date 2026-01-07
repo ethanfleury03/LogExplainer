@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { User } from '@/lib/types';
 import { hasRole } from '@/lib/auth';
-import { BookOpen, Settings, Database, Bug } from 'lucide-react';
+import { BookOpen, Settings, Database, Bug, GitBranch } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
@@ -13,6 +13,7 @@ interface SidebarProps {
 
 const navItems = [
   { href: '/tech/error-debug', label: 'Error Debug', icon: Bug, roles: ['ADMIN', 'TECHNICIAN'] as const },
+  { href: '/tech/call-trace', label: 'Call Trace', icon: GitBranch, roles: ['ADMIN', 'TECHNICIAN'] as const },
   { href: '/library', label: 'Error Library', icon: BookOpen, roles: ['ADMIN', 'TECHNICIAN'] as const },
   { href: '/index-manager', label: 'Index Manager', icon: Database, roles: ['ADMIN'] as const },
   { href: '/tech/error-debug/settings', label: 'Settings', icon: Settings, roles: ['ADMIN', 'TECHNICIAN'] as const },
@@ -24,10 +25,11 @@ export function Sidebar({ user }: SidebarProps) {
   // Extract machine ID from current pathname to preserve it in navigation
   const extractMachineId = (path: string | null): string | null => {
     if (!path) return null;
-    // Match /tech/error-debug/[machineId] or /library/[machineId]
+    // Match /tech/error-debug/[machineId], /tech/call-trace/[machineId], or /library/[machineId]
     const errorDebugMatch = path.match(/\/tech\/error-debug\/([^\/]+)/);
+    const callTraceMatch = path.match(/\/tech\/call-trace\/([^\/]+)/);
     const libraryMatch = path.match(/\/library\/([^\/]+)/);
-    return errorDebugMatch?.[1] || libraryMatch?.[1] || null;
+    return errorDebugMatch?.[1] || callTraceMatch?.[1] || libraryMatch?.[1] || null;
   };
 
   const currentMachineId = extractMachineId(pathname);
@@ -39,6 +41,9 @@ export function Sidebar({ user }: SidebarProps) {
       if (baseHref === '/tech/error-debug') {
         // Preserve machine ID when navigating to Error Debug
         return `/tech/error-debug/${currentMachineId}`;
+      } else if (baseHref === '/tech/call-trace') {
+        // Preserve machine ID when navigating to Call Trace
+        return `/tech/call-trace/${currentMachineId}`;
       } else if (baseHref === '/tech/error-debug/settings') {
         // Preserve machine ID when navigating to Settings
         return `/tech/error-debug/${currentMachineId}/settings`;
@@ -62,6 +67,8 @@ export function Sidebar({ user }: SidebarProps) {
           // Special handling for Settings: active if on any settings route under error-debug
           const isActive = item.href === '/tech/error-debug/settings'
             ? pathname?.startsWith('/tech/error-debug') && pathname?.includes('/settings')
+            : item.href === '/tech/call-trace'
+            ? pathname?.startsWith('/tech/call-trace')
             : pathname === item.href || (item.href !== '/' && pathname?.startsWith(item.href));
           const Icon = item.icon;
           const href = buildHref(item.href);

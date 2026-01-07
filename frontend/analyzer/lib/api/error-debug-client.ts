@@ -465,3 +465,69 @@ export async function getCallgraph(
   return response.json();
 }
 
+export interface ChunkDetail {
+  chunk_id: string;
+  function_name: string;
+  class_name?: string;
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  signature: string;
+  code: string;
+  docstring?: string;
+  leading_comment?: string;
+  error_messages: Array<{
+    message: string;
+    log_level: string;
+    source_type: string;
+  }>;
+  log_levels: string[];
+  route?: string;
+  calls?: Array<{
+    raw: string;
+    name: string;
+    qualifier?: string;
+    kind: 'func' | 'method';
+    resolved_chunk_id?: string;
+    resolved_fqn?: string;
+  }>;
+}
+
+export interface GetChunksResponse {
+  machine_id: string;
+  requested_count: number;
+  found_count: number;
+  chunks: ChunkDetail[];
+  missing_ids: string[];
+}
+
+export async function getChunksByIds(
+  machineId: string,
+  chunkIds: string[]
+): Promise<GetChunksResponse> {
+  if (chunkIds.length === 0) {
+    return {
+      machine_id: machineId,
+      requested_count: 0,
+      found_count: 0,
+      chunks: [],
+      missing_ids: [],
+    };
+  }
+
+  const url = new URL(`${API_BASE_URL}/api/error-debug/chunks`);
+  url.searchParams.append('machine_id', machineId);
+  url.searchParams.append('chunk_ids', chunkIds.join(','));
+  
+  const response = await fetch(url.toString(), {
+    headers: await getHeaders(),
+  });
+  
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(error.detail || `Failed to get chunks: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
