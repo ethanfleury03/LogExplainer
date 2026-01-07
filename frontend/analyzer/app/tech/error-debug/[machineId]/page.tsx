@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { AiSummaryPanel } from '@/components/AiSummaryPanel';
+import { ErrorDebugNav } from '@/components/ErrorDebugNav';
 
 interface SearchResult {
   error_key: string;
@@ -404,6 +405,9 @@ export default function MachineSearchPage() {
           </div>
         </div>
       </div>
+
+      {/* Navigation Tabs */}
+      <ErrorDebugNav machineId={machineId} />
 
       {!hasActiveIndex && (
         <div className="bg-yellow-50 border-b border-yellow-200 p-4">

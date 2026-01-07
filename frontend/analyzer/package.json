@@ -21,9 +21,11 @@
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.378.0",
+    "react-force-graph-3d": "^1.25.4",
     "react-resizable-panels": "^2.0.0",
     "tailwind-merge": "^2.3.0",
-    "tailwindcss-animate": "^1.0.7"
+    "tailwindcss-animate": "^1.0.7",
+    "three": "^0.163.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

@@ -6,6 +6,7 @@ import { getCurrentUser, hasRole } from '@/lib/auth';
 import { listMachines, emailIngestScript, type Machine } from '@/lib/api/error-debug-client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { ErrorDebugNav } from '@/components/ErrorDebugNav';
 
 export default function MachineSettingsPage() {
   const params = useParams();
@@ -127,16 +128,20 @@ export default function MachineSettingsPage() {
   }
 
   return (
-    <div className="p-6">
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold mb-2">Settings</h2>
-        <p className="text-sm text-muted-foreground">
-          Editing: <span className="font-medium">{machine.display_name}</span>
-          {machine.printer_model && (
-            <> • {machine.printer_model}</>
-          )}
-        </p>
-      </div>
+    <div className="h-screen flex flex-col">
+      {/* Navigation Tabs */}
+      <ErrorDebugNav machineId={machineId} />
+      
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="mb-6">
+          <h2 className="text-2xl font-bold mb-2">Settings</h2>
+          <p className="text-sm text-muted-foreground">
+            Editing: <span className="font-medium">{machine.display_name}</span>
+            {machine.printer_model && (
+              <> • {machine.printer_model}</>
+            )}
+          </p>
+        </div>
 
       <div className="space-y-4">
         <Card>
@@ -178,6 +183,7 @@ export default function MachineSettingsPage() {
             <Button onClick={() => setShowEmailModal(true)}>Email Index Script</Button>
           </CardContent>
         </Card>
+      </div>
       </div>
 
       {showEmailModal && (

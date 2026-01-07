@@ -14,6 +14,7 @@ import {
 } from '@/lib/api/error-debug-client';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { ErrorDebugNav } from '@/components/ErrorDebugNav';
 
 export default function VersionsPage() {
   const params = useParams();
@@ -128,18 +129,22 @@ export default function VersionsPage() {
   }
 
   return (
-    <div className="p-8">
-      <div className="flex justify-between items-center mb-6">
-        <div>
-          <h1 className="text-3xl font-bold">{machine.display_name} - Versions</h1>
-          <p className="text-gray-600 mt-1">
-            {machine.printer_model} • {machine.printing_type}
-          </p>
+    <div className="h-screen flex flex-col">
+      {/* Navigation Tabs */}
+      <ErrorDebugNav machineId={machineId} />
+      
+      <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h1 className="text-3xl font-bold">{machine.display_name} - Versions</h1>
+            <p className="text-gray-600 mt-1">
+              {machine.printer_model} • {machine.printing_type}
+            </p>
+          </div>
+          <Button variant="outline" onClick={() => router.push(`/tech/error-debug/${machineId}`)}>
+            Back to Search
+          </Button>
         </div>
-        <Button variant="outline" onClick={() => router.push(`/tech/error-debug/${machineId}`)}>
-          Back to Search
-        </Button>
-      </div>
 
       {error && (
         <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
@@ -217,6 +222,7 @@ export default function VersionsPage() {
           </tbody>
         </table>
       </Card>
+      </div>
     </div>
   );
 }

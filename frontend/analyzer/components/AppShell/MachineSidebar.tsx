@@ -176,6 +176,12 @@ export function MachineSidebar({ user }: MachineSidebarProps) {
     } else if (pathname?.includes('/settings')) {
       // If on settings page, navigate to settings for the new machine
       router.push(`/tech/error-debug/${machineId}/settings`);
+    } else if (pathname?.includes('/versions')) {
+      // If on versions page, navigate to versions for the new machine
+      router.push(`/tech/error-debug/${machineId}/versions`);
+    } else if (pathname?.includes('/map')) {
+      // If on map page, navigate to map for the new machine
+      router.push(`/tech/error-debug/${machineId}/map`);
     } else {
       // Default: navigate to error debug page for the machine
       router.push(`/tech/error-debug/${machineId}`);
