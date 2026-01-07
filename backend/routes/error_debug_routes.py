@@ -848,6 +848,10 @@ async def search_index(
             "route": route,
             "confidence": confidence,
             "query_text": normalized_query,
+            "payload": parsed.get('payload'),
+            "component": parsed.get('component'),
+            "severity": parsed.get('severity'),
+            "tag": parsed.get('tag'),
         },
         "results": results,
         "total_matches": len(results)
@@ -1239,4 +1243,184 @@ async def get_machine_error_keys(
     except Exception as e:
         logger.error(f"Failed to get error keys: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get error keys: {str(e)}")
+
+
+@router.get("/callgraph")
+async def get_callgraph(
+    machine_id: str = Query(...),
+    chunk_id: str = Query(...),
+    direction: str = Query("out", regex="^(out|in)$"),
+    depth: int = Query(1, ge=1, le=3),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    user: DevUser = Depends(require_role)
+):
+    """
+    Get callgraph for a specific chunk.
+    
+    Returns nodes and edges up to specified depth.
+    """
+    logger.info(
+        f"Callgraph request: machine_id={machine_id}, chunk_id={chunk_id}, "
+        f"direction={direction}, depth={depth}, limit={limit}, user={user.email}"
+    )
+    
+    try:
+        machine_uuid = uuid.UUID(machine_id)
+    except ValueError:
+        logger.error(f"Callgraph: Invalid machine_id format: {machine_id}")
+        raise HTTPException(status_code=400, detail="Invalid machine_id format")
+    
+    machine = db.query(Machine).filter(Machine.id == machine_uuid).first()
+    if not machine:
+        logger.error(f"Callgraph: Machine not found: {machine_id}")
+        raise HTTPException(status_code=404, detail="Machine not found")
+    
+    if not machine.active_version_id:
+        logger.warning(f"Callgraph: No active index for machine: {machine_id}")
+        raise HTTPException(status_code=400, detail="No active index for this machine")
+    
+    # Get active version
+    version = db.query(MachineIndexVersion).filter(
+        MachineIndexVersion.id == machine.active_version_id
+    ).first()
+    
+    if not version:
+        logger.error(f"Callgraph: Active version not found: {machine.active_version_id}")
+        raise HTTPException(status_code=404, detail="Active version not found")
+    
+    # Try cache first
+    index_data = _get_cached_index(str(machine.id), str(version.id))
+    
+    if not index_data:
+        # Load from storage
+        try:
+            index_bytes = load_index_file(version.gcs_bucket, version.gcs_object)
+            index_data = json.loads(index_bytes.decode('utf-8'))
+            _set_cached_index(str(machine.id), str(version.id), index_data)
+        except FileNotFoundError:
+            logger.error(f"Callgraph: Index file not found for machine: {machine_id}")
+            raise HTTPException(status_code=404, detail="Index file not found in storage")
+        except Exception as e:
+            logger.error(f"Callgraph: Failed to load index: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to load index: {e}")
+    
+    # Check if callgraph exists
+    callgraph = index_data.get('callgraph')
+    if not callgraph:
+        logger.warning(f"Callgraph: No callgraph data in index for machine: {machine_id}")
+        return {
+            "machine_id": machine_id,
+            "chunk_id": chunk_id,
+            "direction": direction,
+            "depth": depth,
+            "nodes": [],
+            "edges": [],
+            "unresolved": [],
+            "warning": "Callgraph not available in index"
+        }
+    
+    # Build chunk lookup map
+    chunks_by_id = {}
+    for chunk in index_data.get('chunks', []):
+        cid = chunk.get('chunk_id')
+        if cid:
+            chunks_by_id[cid] = chunk
+    
+    # Check if requested chunk exists
+    if chunk_id not in chunks_by_id:
+        logger.warning(f"Callgraph: Chunk not found: {chunk_id}")
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    
+    # Get edges based on direction
+    edges_map = callgraph.get(direction, {})
+    if direction == "in":
+        # For "in", we need to reverse the lookup
+        edges_map = callgraph.get("out", {})
+        # Build reverse map
+        reverse_map = {}
+        for caller_id, callee_ids in edges_map.items():
+            for callee_id in callee_ids:
+                if callee_id not in reverse_map:
+                    reverse_map[callee_id] = []
+                reverse_map[callee_id].append(caller_id)
+        edges_map = reverse_map
+    
+    # BFS traversal to get nodes up to depth
+    visited = set()
+    nodes = []
+    edges = []
+    queue = [(chunk_id, 0)]  # (chunk_id, current_depth)
+    visited.add(chunk_id)
+    
+    # Add root node
+    root_chunk = chunks_by_id[chunk_id]
+    nodes.append({
+        "chunk_id": chunk_id,
+        "label": "{} ({})".format(
+            root_chunk.get('function_name', 'unknown'),
+            root_chunk.get('file_path', 'unknown')
+        ),
+        "file_path": root_chunk.get('file_path', ''),
+        "function_name": root_chunk.get('function_name', ''),
+        "class_name": root_chunk.get('class_name'),
+        "route": root_chunk.get('route', 'unknown')
+    })
+    
+    while queue and len(nodes) < limit:
+        current_id, current_depth = queue.pop(0)
+        
+        if current_depth >= depth:
+            continue
+        
+        # Get neighbors
+        neighbor_ids = edges_map.get(current_id, [])
+        
+        for neighbor_id in neighbor_ids:
+            if neighbor_id not in visited and neighbor_id in chunks_by_id:
+                visited.add(neighbor_id)
+                neighbor_chunk = chunks_by_id[neighbor_id]
+                
+                nodes.append({
+                    "chunk_id": neighbor_id,
+                    "label": "{} ({})".format(
+                        neighbor_chunk.get('function_name', 'unknown'),
+                        neighbor_chunk.get('file_path', 'unknown')
+                    ),
+                    "file_path": neighbor_chunk.get('file_path', ''),
+                    "function_name": neighbor_chunk.get('function_name', ''),
+                    "class_name": neighbor_chunk.get('class_name'),
+                    "route": neighbor_chunk.get('route', 'unknown')
+                })
+                
+                # Add edge
+                if direction == "out":
+                    edges.append({"from": current_id, "to": neighbor_id})
+                else:
+                    edges.append({"from": neighbor_id, "to": current_id})
+                
+                # Add to queue for next depth
+                if current_depth + 1 < depth:
+                    queue.append((neighbor_id, current_depth + 1))
+    
+    # Get unresolved calls
+    unresolved = []
+    if direction == "out":
+        unresolved_out = callgraph.get("unresolved_out", {})
+        unresolved = unresolved_out.get(chunk_id, [])
+    
+    logger.info(
+        f"Callgraph: chunk_id={chunk_id}, direction={direction}, "
+        f"returned {len(nodes)} nodes, {len(edges)} edges, {len(unresolved)} unresolved"
+    )
+    
+    return {
+        "machine_id": machine_id,
+        "chunk_id": chunk_id,
+        "direction": direction,
+        "depth": depth,
+        "nodes": nodes,
+        "edges": edges,
+        "unresolved": unresolved
+    }
 

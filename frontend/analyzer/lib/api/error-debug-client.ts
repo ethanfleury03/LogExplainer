@@ -33,7 +33,7 @@ interface MachineVersion {
   stats: Record<string, any>;
 }
 
-interface SearchResult {
+export interface SearchResult {
   error_key: string;
   chunks: Array<{
     chunk_id: string;
@@ -409,6 +409,57 @@ export async function generateAiSummary(
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }));
     throw new Error(error.detail || `Failed to generate AI summary: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
+export interface CallgraphNode {
+  chunk_id: string;
+  label: string;
+  file_path: string;
+  function_name: string;
+  class_name?: string;
+  route: string;
+}
+
+export interface CallgraphEdge {
+  from: string;
+  to: string;
+}
+
+export interface CallgraphResponse {
+  machine_id: string;
+  chunk_id: string;
+  direction: 'out' | 'in';
+  depth: number;
+  nodes: CallgraphNode[];
+  edges: CallgraphEdge[];
+  unresolved: string[];
+  warning?: string;
+}
+
+export async function getCallgraph(
+  machineId: string,
+  chunkId: string,
+  direction: 'out' | 'in' = 'out',
+  depth: number = 1,
+  limit: number = 200
+): Promise<CallgraphResponse> {
+  const url = new URL(`${API_BASE_URL}/api/error-debug/callgraph`);
+  url.searchParams.append('machine_id', machineId);
+  url.searchParams.append('chunk_id', chunkId);
+  url.searchParams.append('direction', direction);
+  url.searchParams.append('depth', depth.toString());
+  url.searchParams.append('limit', limit.toString());
+  
+  const response = await fetch(url.toString(), {
+    headers: await getHeaders(),
+  });
+  
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(error.detail || `Failed to get callgraph: ${response.statusText}`);
   }
   
   return response.json();

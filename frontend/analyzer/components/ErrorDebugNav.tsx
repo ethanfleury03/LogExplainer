@@ -16,7 +16,7 @@ export function ErrorDebugNav({ machineId }: ErrorDebugNavProps) {
     { id: 'search', label: 'Search', path: `/tech/error-debug/${machineId}` },
     { id: 'versions', label: 'Versions', path: `/tech/error-debug/${machineId}/versions` },
     { id: 'settings', label: 'Settings', path: `/tech/error-debug/${machineId}/settings` },
-    { id: 'map', label: 'Map', path: `/tech/error-debug/${machineId}/map` },
+    { id: 'map', label: 'Trace View', path: `/tech/error-debug/${machineId}/map` },
   ];
 
   const isActive = (path: string) => {

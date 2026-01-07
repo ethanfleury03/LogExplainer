@@ -979,6 +979,315 @@ def _detect_chunk_route(file_path, func_name, class_name, code):
     return 'unknown'
 
 
+# Python keywords to exclude from call extraction
+PYTHON_KEYWORDS = {
+    'if', 'for', 'while', 'return', 'yield', 'lambda', 'with', 'def', 'class',
+    'assert', 'try', 'except', 'raise', 'import', 'from', 'pass', 'break',
+    'continue', 'else', 'elif', 'finally', 'del', 'global', 'nonlocal', 'in',
+    'is', 'not', 'and', 'or', 'as', 'async', 'await'
+}
+
+# Common builtins to exclude
+COMMON_BUILTINS = {
+    'print', 'len', 'range', 'int', 'str', 'float', 'dict', 'list', 'set',
+    'tuple', 'open', 'isinstance', 'getattr', 'setattr', 'super', 'type',
+    'hasattr', 'delattr', 'callable', 'iter', 'next', 'enumerate', 'zip',
+    'map', 'filter', 'reduce', 'sorted', 'reversed', 'min', 'max', 'sum',
+    'abs', 'round', 'divmod', 'pow', 'all', 'any', 'bool', 'chr', 'ord',
+    'hex', 'oct', 'bin', 'repr', 'eval', 'exec', 'compile', 'globals',
+    'locals', 'vars', 'dir', 'hash', 'id', 'input', 'raw_input'
+}
+
+
+def extract_calls_from_code(code):
+    """
+    Extract function/method calls from code using regex.
+    
+    Returns list of call dicts:
+    [
+        {
+            "raw": "obj.method(",
+            "name": "method",
+            "qualifier": "obj" | None,
+            "kind": "func" | "method"
+        },
+        ...
+    ]
+    """
+    if not code or not isinstance(code, (str, unicode)):
+        return []
+    
+    calls = []
+    seen_raw = set()  # Deduplicate by raw string
+    
+    # Pattern 1: Method calls: obj.method(
+    method_pattern = r'\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\('
+    for match in re.finditer(method_pattern, code):
+        qualifier = match.group(1)
+        name = match.group(2)
+        raw = match.group(0)
+        
+        # Skip if name is a keyword or builtin
+        if name in PYTHON_KEYWORDS or name in COMMON_BUILTINS:
+            continue
+        
+        # Skip very short names (likely typos or variables)
+        if len(name) <= 2 and name not in ('id', 'in', 'is'):
+            continue
+        
+        if raw not in seen_raw:
+            seen_raw.add(raw)
+            calls.append({
+                "raw": raw,
+                "name": name,
+                "qualifier": qualifier,
+                "kind": "method"
+            })
+    
+    # Pattern 2: Function calls: func(
+    # Exclude method calls (already captured above)
+    func_pattern = r'\b([A-Za-z_][A-Za-z0-9_]*)\s*\('
+    for match in re.finditer(func_pattern, code):
+        name = match.group(1)
+        raw = match.group(0)
+        
+        # Skip if it's actually a method call (has dot before it)
+        # Check if there's a dot before this match
+        start_pos = match.start()
+        if start_pos > 0:
+            before = code[max(0, start_pos - 50):start_pos]
+            # If there's a dot and identifier before, it's a method call (skip)
+            if re.search(r'\b[A-Za-z_][A-Za-z0-9_]*\.\s*$', before):
+                continue
+        
+        # Skip keywords and builtins
+        if name in PYTHON_KEYWORDS or name in COMMON_BUILTINS:
+            continue
+        
+        # Skip very short names
+        if len(name) <= 2 and name not in ('id', 'in', 'is'):
+            continue
+        
+        if raw not in seen_raw:
+            seen_raw.add(raw)
+            calls.append({
+                "raw": raw,
+                "name": name,
+                "qualifier": None,
+                "kind": "func"
+            })
+    
+    return calls
+
+
+def build_symbol_table(chunks):
+    """
+    Build symbol table for call resolution.
+    
+    Returns dict with:
+    {
+        "simple": { "function_name": chunk_id | [chunk_ids] },  # unique or list if collisions
+        "method": { "Class.method": chunk_id },
+        "by_chunk_id": { chunk_id: { "file_path": ..., "function_name": ..., "class_name": ... } }
+    }
+    """
+    symbol_table = {
+        "simple": {},
+        "method": {},
+        "by_chunk_id": {}
+    }
+    
+    for chunk in chunks:
+        chunk_id = chunk.get('chunk_id')
+        if not chunk_id:
+            continue
+        
+        file_path = chunk.get('file_path', '')
+        function_name = chunk.get('function_name', '')
+        class_name = chunk.get('class_name')
+        
+        # Store by chunk_id
+        symbol_table["by_chunk_id"][chunk_id] = {
+            "file_path": file_path,
+            "function_name": function_name,
+            "class_name": class_name
+        }
+        
+        # Simple name lookup
+        if function_name:
+            if function_name not in symbol_table["simple"]:
+                symbol_table["simple"][function_name] = chunk_id
+            else:
+                # Collision - convert to list
+                existing = symbol_table["simple"][function_name]
+                if isinstance(existing, list):
+                    existing.append(chunk_id)
+                else:
+                    symbol_table["simple"][function_name] = [existing, chunk_id]
+        
+        # Method lookup: Class.method
+        if class_name and function_name:
+            method_key = "{}.{}".format(class_name, function_name)
+            symbol_table["method"][method_key] = chunk_id
+    
+    return symbol_table
+
+
+def resolve_calls(calls, symbol_table, caller_chunk_id, caller_file_path):
+    """
+    Resolve calls to chunk_ids using symbol table.
+    
+    Args:
+        calls: List of call dicts from extract_calls_from_code
+        symbol_table: Symbol table from build_symbol_table
+        caller_chunk_id: Chunk ID of the calling function
+        caller_file_path: File path of the calling function
+    
+    Returns:
+        (resolved_calls, unresolved_calls, edges)
+        - resolved_calls: List of call dicts with resolved_chunk_id and resolved_fqn
+        - unresolved_calls: List of raw call strings
+        - edges: List of (caller_chunk_id, callee_chunk_id) tuples
+    """
+    resolved_calls = []
+    unresolved_calls = []
+    edges = []
+    
+    for call in calls:
+        name = call.get('name')
+        qualifier = call.get('qualifier')
+        kind = call.get('kind')
+        
+        resolved_chunk_id = None
+        resolved_fqn = None
+        
+        # Try resolution strategies
+        if kind == "method" and qualifier:
+            # Strategy 1: Try method resolution (Class.method)
+            # If qualifier matches a known class name, try Class.method
+            # Otherwise, try simple name resolution
+            method_key = "{}.{}".format(qualifier, name)
+            if method_key in symbol_table["method"]:
+                resolved_chunk_id = symbol_table["method"][method_key]
+                resolved_fqn = method_key
+            else:
+                # Fallback to simple name resolution
+                if name in symbol_table["simple"]:
+                    candidate = symbol_table["simple"][name]
+                    if isinstance(candidate, list):
+                        # Collision - prefer same file_path
+                        for cid in candidate:
+                            chunk_info = symbol_table["by_chunk_id"].get(cid)
+                            if chunk_info and chunk_info["file_path"] == caller_file_path:
+                                resolved_chunk_id = cid
+                                resolved_fqn = name
+                                break
+                        # If no same-file match, take first (or leave unresolved)
+                        if not resolved_chunk_id and candidate:
+                            resolved_chunk_id = candidate[0]
+                            resolved_fqn = name
+                    else:
+                        resolved_chunk_id = candidate
+                        resolved_fqn = name
+        else:
+            # Strategy 2: Simple function name resolution
+            if name in symbol_table["simple"]:
+                candidate = symbol_table["simple"][name]
+                if isinstance(candidate, list):
+                    # Collision - prefer same file_path
+                    for cid in candidate:
+                        chunk_info = symbol_table["by_chunk_id"].get(cid)
+                        if chunk_info and chunk_info["file_path"] == caller_file_path:
+                            resolved_chunk_id = cid
+                            resolved_fqn = name
+                            break
+                    # If no same-file match, take first
+                    if not resolved_chunk_id and candidate:
+                        resolved_chunk_id = candidate[0]
+                        resolved_fqn = name
+                else:
+                    resolved_chunk_id = candidate
+                    resolved_fqn = name
+        
+        # Build resolved call entry
+        resolved_call = call.copy()
+        resolved_call["resolved_chunk_id"] = resolved_chunk_id
+        resolved_call["resolved_fqn"] = resolved_fqn
+        
+        if resolved_chunk_id:
+            resolved_calls.append(resolved_call)
+            edges.append((caller_chunk_id, resolved_chunk_id))
+        else:
+            unresolved_calls.append(call["raw"])
+    
+    return resolved_calls, unresolved_calls, edges
+
+
+def build_callgraph(chunks, symbol_table):
+    """
+    Build callgraph from chunks and symbol table.
+    
+    Returns:
+        {
+            "out": { chunk_id: [callee_chunk_id, ...], ... },
+            "in": { chunk_id: [caller_chunk_id, ...], ... },
+            "unresolved_out": { chunk_id: [rawCall1, ...], ... }
+        }
+    """
+    callgraph = {
+        "out": {},
+        "in": {},
+        "unresolved_out": {}
+    }
+    
+    all_edges = []
+    
+    # Process each chunk
+    for chunk in chunks:
+        chunk_id = chunk.get('chunk_id')
+        if not chunk_id:
+            continue
+        
+        code = chunk.get('code', '')
+        file_path = chunk.get('file_path', '')
+        
+        # Extract calls from code
+        calls = extract_calls_from_code(code)
+        
+        # Resolve calls
+        resolved_calls, unresolved_calls, edges = resolve_calls(
+            calls, symbol_table, chunk_id, file_path
+        )
+        
+        # Store ALL calls in chunk (both resolved and unresolved)
+        # This includes resolved_chunk_id and resolved_fqn for resolved ones
+        chunk["calls"] = resolved_calls
+        
+        # Build outgoing edges
+        callee_ids = []
+        for edge in edges:
+            caller_id, callee_id = edge
+            if caller_id == chunk_id:
+                callee_ids.append(callee_id)
+                all_edges.append(edge)
+        
+        if callee_ids:
+            callgraph["out"][chunk_id] = callee_ids
+        
+        # Store unresolved calls
+        if unresolved_calls:
+            callgraph["unresolved_out"][chunk_id] = unresolved_calls
+    
+    # Build incoming edges (reverse of outgoing)
+    for caller_id, callee_id in all_edges:
+        if callee_id not in callgraph["in"]:
+            callgraph["in"][callee_id] = []
+        if caller_id not in callgraph["in"][callee_id]:
+            callgraph["in"][callee_id].append(caller_id)
+    
+    return callgraph
+
+
 def extract_function_chunk(file_path, func_node, source_lines, class_name=None, boundary_map=None, source_text=None):
     """
     Extract function as chunk with full metadata including signature, decorators, and perfect boundaries.
@@ -1399,6 +1708,57 @@ def index_codebase(root_path, output_path, include_exts=None, exclude_dirs=None,
     # Build custom error glossary (now that we have all exceptions and usages)
     custom_error_glossary = build_custom_error_glossary(all_custom_exceptions, all_exception_usages)
     
+    # Build callgraph (PASS 1: Build symbol table, PASS 2: Extract and resolve calls)
+    print("Building callgraph...", file=sys.stderr)
+    callgraph_stats = {
+        'total_functions': len(chunks),
+        'total_calls_extracted': 0,
+        'resolved_calls': 0,
+        'unresolved_calls': 0,
+        'collisions': 0
+    }
+    
+    # Initialize calls array for all chunks
+    for chunk in chunks:
+        chunk["calls"] = []
+    
+    # PASS 1: Build symbol table
+    symbol_table = build_symbol_table(chunks)
+    
+    # Count collisions
+    for name, value in symbol_table["simple"].items():
+        if isinstance(value, list):
+            callgraph_stats['collisions'] += 1
+    
+    # PASS 2: Extract calls and resolve
+    callgraph = build_callgraph(chunks, symbol_table)
+    
+    # Count statistics
+    for chunk in chunks:
+        calls = chunk.get("calls", [])
+        callgraph_stats['total_calls_extracted'] += len(calls)
+        for call in calls:
+            if call.get("resolved_chunk_id"):
+                callgraph_stats['resolved_calls'] += 1
+    
+    # Count unresolved from callgraph
+    for chunk_id, unresolved_list in callgraph.get("unresolved_out", {}).items():
+        callgraph_stats['unresolved_calls'] += len(unresolved_list)
+    
+    # Log summary
+    resolved_pct = 0.0
+    if callgraph_stats['total_calls_extracted'] > 0:
+        resolved_pct = (float(callgraph_stats['resolved_calls']) / 
+                       float(callgraph_stats['total_calls_extracted'])) * 100.0
+    
+    print("Callgraph stats: {} functions, {} calls extracted, {:.1f}% resolved, {} unresolved, {} collisions".format(
+        callgraph_stats['total_functions'],
+        callgraph_stats['total_calls_extracted'],
+        resolved_pct,
+        callgraph_stats['unresolved_calls'],
+        callgraph_stats['collisions']
+    ), file=sys.stderr)
+    
     # Build index
     index = {
         "schema_version": "1.0",
@@ -1406,6 +1766,7 @@ def index_codebase(root_path, output_path, include_exts=None, exclude_dirs=None,
         "chunks": chunks,
         "error_index": error_index,
         "custom_error_glossary": custom_error_glossary,
+        "callgraph": callgraph,
         "stats": stats,
         "total_chunks": len(chunks),
         "total_errors": stats['errors_found'],

@@ -59,10 +59,15 @@
 }
 
 /* Center ForceGraph3D canvas */
+.force-graph-container {
+  background-color: white !important;
+}
+
 .force-graph-container canvas {
   display: block !important;
   margin: 0 auto !important;
   /* Center the graph by shifting to the left to compensate for right offset */
   transform: translateX(-250px) !important;
+  background-color: white !important;
 }
 
